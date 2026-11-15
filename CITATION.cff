@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "If you use this software or its validation datasets, please cite both the software repository and the accompanying CRV Science Apps monograph."
+type: software
+title: "NeuroSpace Lab: Interactive 3D Neural Network Topology, Plasticity & Cerebral Cortex Wetware Lab in Safe Rust"
+version: "1.6.0"
+date-released: "2026-11-15"
+doi: "10.5281/zenodo.24263468"
+url: "https://crvscience.com/apps"
+repository-code: "https://github.com/bpwhite/crvscience-neurospace-lab"
+license: "MIT"
+authors:
+  - family-names: "White"
+    given-names: "Bryan P."
+    affiliation: "CRV Science Labs"
+    orcid: "https://orcid.org/0000-0003-4191-3511"
+keywords:
+  - "computational neuroscience"
+  - "cerebral cortex"
+  - "structural plasticity"
+  - "spiking neural networks"
+  - "3D visualization"
+  - "Rust"
+preferred-citation:
+  type: article
+  title: "NeuroSpace Lab: 3D Neural Network Topology, Structural Plasticity, and Six-Layered Cerebral Cortex Simulation in Safe Rust"
+  authors:
+    - family-names: "White"
+      given-names: "Bryan P."
+      affiliation: "CRV Science Labs"
+      orcid: "https://orcid.org/0000-0003-4191-3511"
+  year: 2026
+  journal: "CRV Science Apps Preprints"
+  doi: "10.5281/zenodo.24263468"
+  url: "https://crvscience.com/apps/preprints/neurospace-lab-3d-neural-cortex"
+  notes: "Preprint ID: APP-PREPRINT-19 (Zenodo Concept DOI reserved)"
+references:
+  - type: article
+    title: "The CRV Science App Network: Seventeen Open-Source Rust Programs for Science, Data, and Simulation"
+    authors:
+      - family-names: "White"
+        given-names: "Bryan P."
+        affiliation: "CRV Science Labs"
+        orcid: "https://orcid.org/0000-0003-4191-3511"
+    year: 2026
+    journal: "CRV Science Apps Preprints"
+    doi: "10.5281/zenodo.24222398"
+    url: "https://crvscience.com/apps/preprints/crv-science-public-apps-network"
+    notes: "Preprint ID: APP-PREPRINT-01 (CRV Science Open-Source Apps Network Overview)"

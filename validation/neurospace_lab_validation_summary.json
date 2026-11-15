@@ -1,0 +1,13 @@
+{
+  "app": "NeuroSpace Lab",
+  "repo": "crvscience-neurospace-lab",
+  "version": "1.6.0",
+  "preprintId": "APP-PREPRINT-19",
+  "slug": "neurospace-lab-3d-neural-cortex",
+  "testsPassed": 5,
+  "testsTotal": 5,
+  "testDurationSec": 0.47,
+  "unsafeCode": "forbidden",
+  "modelsCount": 15,
+  "datasetsCount": 7
+}

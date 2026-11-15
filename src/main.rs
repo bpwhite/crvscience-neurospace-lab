@@ -1,0 +1,159 @@
+#![forbid(unsafe_code)]
+
+use clap::{Parser, Subcommand};
+use neurospace_lab::datasets::DatasetId;
+use neurospace_lab::engine::NeuralSpaceSim;
+use neurospace_lab::gui::{render_headless_screenshot, NeuroSpaceApp};
+use neurospace_lab::models::{ModelArch, RenderMode};
+use neurospace_lab::persistence::WorksetEnvelope;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "neurospace-lab",
+    version = "1.6.0",
+    about = "Native Rust 3D Neural Network Topology, Plasticity & Cerebral Cortex Wetware Lab"
+)]
+struct Cli {
+    /// Render a 1600x1000 offscreen GPU PNG screenshot to this path and exit
+    #[arg(long, value_name = "PNG_PATH")]
+    headless_screenshot: Option<PathBuf>,
+
+    /// View preset for `--headless-screenshot` (1 = M13 Cerebral Cortex, 2 = M11 Cortical Columns, 3 = M14 Frontier LLM)
+    #[arg(long, default_value_t = 1)]
+    screenshot_view: u8,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Launch the interactive 3D Neural Space GUI workstation (default)
+    Gui,
+    /// Lock a dataset and benchmark all 13 neural network models headlessly
+    BenchDataset {
+        /// Dataset code (D1..D7)
+        #[arg(short, long, default_value = "D4")]
+        dataset: String,
+        /// Training steps per model
+        #[arg(short, long, default_value_t = 60)]
+        steps: usize,
+    },
+    /// Lock a neural network model and benchmark all 7 datasets headlessly
+    BenchModel {
+        /// Model code (M1..M13)
+        #[arg(short, long, default_value = "M13")]
+        model: String,
+        /// Training steps per dataset
+        #[arg(short, long, default_value_t = 60)]
+        steps: usize,
+    },
+    /// Emit a portable SHA-256 verified .neuroworkset.json snapshot to stdout
+    ExportSampleWorkset,
+}
+
+fn parse_dataset(code: &str) -> DatasetId {
+    DatasetId::ALL
+        .into_iter()
+        .find(|d| d.code().eq_ignore_ascii_case(code))
+        .unwrap_or(DatasetId::D4PlantSpecies)
+}
+
+fn parse_model(code: &str) -> ModelArch {
+    ModelArch::ALL
+        .into_iter()
+        .find(|m| m.code().eq_ignore_ascii_case(code))
+        .unwrap_or(ModelArch::M13CerebralCortexGreyMatter)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    if let Some(out_path) = cli.headless_screenshot {
+        render_headless_screenshot(&out_path, cli.screenshot_view)?;
+        return Ok(());
+    }
+
+    match cli.command.unwrap_or(Commands::Gui) {
+        Commands::Gui => {
+            let native_options = eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default()
+                    .with_inner_size([1440.0, 900.0])
+                    .with_min_inner_size([1024.0, 680.0])
+                    .with_title("NeuroSpace Lab v1.6.0 — 3D Neural Topology & Cerebral Cortex Grey-Matter Workstation"),
+                ..Default::default()
+            };
+            eframe::run_native(
+                "NeuroSpace Lab v1.6.0",
+                native_options,
+                Box::new(|cc| Ok(Box::new(NeuroSpaceApp::new(cc)))),
+            )?;
+        }
+        Commands::BenchDataset { dataset, steps } => {
+            let ds = parse_dataset(&dataset);
+            let mut sim = NeuralSpaceSim::new(ModelArch::M1PerceptronMlp, ds, 2026);
+            sim.dataset_locked = true;
+            sim.run_locked_sweep(steps);
+            println!(
+                "=== Locked Dataset Benchmark: {} ({}) ===",
+                ds.code(),
+                ds.title()
+            );
+            println!(
+                "{:<6} {:<46} {:>10} {:>10} {:>12}",
+                "Code", "Architecture", "Score(%)", "Loss", "Neurons/Syn"
+            );
+            for rec in &sim.comparison_ledger {
+                println!(
+                    "{:<6} {:<46} {:>9.2}% {:>10.4} {:>5}/{:<5}",
+                    rec.model.code(),
+                    rec.model.name(),
+                    rec.primary_score,
+                    rec.loss,
+                    rec.neuron_count,
+                    rec.synapse_count
+                );
+            }
+        }
+        Commands::BenchModel { model, steps } => {
+            let arch = parse_model(&model);
+            let mut sim = NeuralSpaceSim::new(arch, DatasetId::D1ImageClassification, 2026);
+            sim.model_locked = true;
+            sim.run_locked_sweep(steps);
+            println!(
+                "=== Locked Model Benchmark: {} ({}) ===",
+                arch.code(),
+                arch.name()
+            );
+            println!(
+                "{:<6} {:<44} {:>10} {:>10} {:>12}",
+                "Data", "Domain", "Score(%)", "Loss", "Neurons/Syn"
+            );
+            for rec in &sim.comparison_ledger {
+                println!(
+                    "{:<6} {:<44} {:>9.2}% {:>10.4} {:>5}/{:<5}",
+                    rec.dataset.code(),
+                    rec.dataset.title(),
+                    rec.primary_score,
+                    rec.loss,
+                    rec.neuron_count,
+                    rec.synapse_count
+                );
+            }
+        }
+        Commands::ExportSampleWorkset => {
+            let mut sim = NeuralSpaceSim::new(
+                ModelArch::M13CerebralCortexGreyMatter,
+                DatasetId::D7MolecularProperties,
+                2026,
+            );
+            for _ in 0..25 {
+                sim.step_simulation();
+            }
+            let env = WorksetEnvelope::from_sim(&sim, RenderMode::AutoAdaptive, 1.0);
+            println!("{}", serde_json::to_string_pretty(&env)?);
+        }
+    }
+    Ok(())
+}
