@@ -14,12 +14,16 @@
 // along with this program.  If not, see <https://gnu.org>.
 
 use crate::datasets::DatasetId;
-use crate::engine::{ComparisonRecord, NeuralSpaceSim};
+use crate::engine::{ComparisonRecord, NeuralSpaceSim, NeuronNode, SynapseEdge};
 use crate::models::{HyperParams, ModelArch, OutputGoal, RenderMode};
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, Error as SqlError, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
 
 /// Portable cross-compatible snapshot envelope shared between the native Rust workstation
 /// and the interactive browser observatory (`.neuroworkset.json`).
@@ -38,6 +42,44 @@ pub struct WorksetEnvelope {
     pub primary_metric: f32,
     pub current_loss: f32,
     pub comparison_ledger: Vec<ComparisonRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub neurons: Vec<NeuronNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synapses: Vec<SynapseEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_ids: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_ids: Vec<usize>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub epoch_count: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pruned_total: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sprouted_total: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub neurogenesis_total: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub apoptosis_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_lesion_metric: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acute_lesion_metric: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loss_history: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metric_history: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synapse_history: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lesion_events: Vec<(usize, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opto_clamp_drive: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metabolic_flux: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adversarial_margin: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_prediction: Vec<f32>,
     pub sha256_digest: String,
 }
 
@@ -61,6 +103,25 @@ impl WorksetEnvelope {
             primary_metric: sim.primary_metric,
             current_loss: sim.current_loss,
             comparison_ledger: sim.comparison_ledger.clone(),
+            neurons: sim.neurons.clone(),
+            synapses: sim.synapses.clone(),
+            input_ids: sim.input_ids.clone(),
+            output_ids: sim.output_ids.clone(),
+            epoch_count: sim.epoch_count,
+            pruned_total: sim.pruned_total,
+            sprouted_total: sim.sprouted_total,
+            neurogenesis_total: sim.neurogenesis_total,
+            apoptosis_total: sim.apoptosis_total,
+            pre_lesion_metric: sim.pre_lesion_metric,
+            acute_lesion_metric: sim.acute_lesion_metric,
+            loss_history: sim.loss_history.clone(),
+            metric_history: sim.metric_history.clone(),
+            synapse_history: sim.synapse_history.clone(),
+            lesion_events: sim.lesion_events.clone(),
+            opto_clamp_drive: Some(sim.opto_clamp_drive),
+            metabolic_flux: Some(sim.metabolic_flux),
+            adversarial_margin: Some(sim.adversarial_margin),
+            last_prediction: sim.last_prediction.clone(),
             sha256_digest: String::new(),
         };
         env.sha256_digest = env.compute_digest();
@@ -78,6 +139,37 @@ impl WorksetEnvelope {
 
     pub fn verify_digest(&self) -> bool {
         !self.sha256_digest.is_empty() && self.sha256_digest == self.compute_digest()
+    }
+
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!(
+                        "Failed to create directory '{}': {e}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize workset JSON: {e}"))?;
+        std::fs::write(path, json)
+            .map_err(|e| format!("Failed to write workset file '{}': {e}", path.display()))
+    }
+
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read workset file '{}': {e}", path.display()))?;
+        let env: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("Invalid workset JSON in '{}': {e}", path.display()))?;
+        if !env.verify_digest() {
+            return Err(format!(
+                "SHA-256 checksum verification failed for '{}'",
+                path.display()
+            ));
+        }
+        Ok(env)
     }
 }
 
@@ -127,7 +219,8 @@ impl LabStore {
     }
 
     pub fn save_slot(&self, slot_name: &str, env: &WorksetEnvelope) -> SqlResult<()> {
-        let payload = serde_json::to_string_pretty(env).unwrap_or_default();
+        let payload = serde_json::to_string_pretty(env)
+            .map_err(|e| SqlError::ToSqlConversionFailure(Box::new(e)))?;
         self.conn.execute(
             "INSERT INTO save_slots (slot_name, envelope_json, sha256_hex, updated_epoch)
              VALUES (?1, ?2, ?3, ?4)
@@ -147,8 +240,14 @@ impl LabStore {
         let mut rows = stmt.query(params![slot_name])?;
         if let Some(row) = rows.next()? {
             let json_str: String = row.get(0)?;
-            let parsed: Option<WorksetEnvelope> = serde_json::from_str(&json_str).ok();
-            Ok(parsed)
+            let parsed: WorksetEnvelope = serde_json::from_str(&json_str).map_err(|e| {
+                SqlError::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok(Some(parsed))
         } else {
             Ok(None)
         }

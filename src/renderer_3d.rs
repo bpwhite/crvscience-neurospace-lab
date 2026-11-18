@@ -109,7 +109,7 @@ pub fn draw_neural_space_3d(
         draw_cortical_surface_planes(painter, rect, cam, &vp);
     } else if organic < 0.72 {
         let grid_alpha = ((1.0 - organic * 1.15).clamp(0.12, 0.85) * 40.0) as u8;
-        let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 120, 180, grid_alpha));
+        let stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(70, 120, 180, grid_alpha));
         for g in -6..=6 {
             let gz = g as f32 * 2.0;
             if let (Some((p0, _)), Some((p1, _))) = (
@@ -128,7 +128,7 @@ pub fn draw_neural_space_3d(
         }
     } else {
         let ring_stroke = Stroke::new(
-            1.1,
+            1.1_f32,
             Color32::from_rgba_unmultiplied(40, 190, 155, (organic * 36.0) as u8),
         );
         for r_idx in 1..=4 {
@@ -149,10 +149,12 @@ pub fn draw_neural_space_3d(
         }
     }
 
-    // 2. 3D Group / Cortical Lamina Enclosures
-    if show_group_highlights {
-        draw_group_zone_highlights(painter, rect, sim, cam, &vp, organic);
-    }
+    // 2. 3D Group / Cortical Lamina Enclosures (wireframe boxes pre-synapse; pills deferred post-soma)
+    let zone_pills = if show_group_highlights {
+        draw_group_zone_boxes(painter, rect, sim, cam, &vp, organic)
+    } else {
+        Vec::new()
+    };
 
     let mut projected: Vec<Option<(Pos2, f32)>> = Vec::with_capacity(sim.neurons.len());
     for n in &sim.neurons {
@@ -180,7 +182,10 @@ pub fn draw_neural_space_3d(
     for (s_idx, syn) in sim.synapses.iter().enumerate() {
         if syn.severed || sim.neurons[syn.from].ablated || sim.neurons[syn.to].ablated {
             if let (Some((pf, _)), Some((pt, _))) = (projected[syn.from], projected[syn.to]) {
-                painter.line_segment([pf, pt], Stroke::new(0.6, Color32::from_rgba_unmultiplied(100, 116, 139, 26)));
+                painter.line_segment(
+                    [pf, pt],
+                    Stroke::new(0.6_f32, Color32::from_rgba_unmultiplied(100, 116, 139, 26)),
+                );
             }
             continue;
         }
@@ -192,6 +197,26 @@ pub fn draw_neural_space_3d(
         let depth = (d_from + d_to) * 0.5;
         let persp_w = (20.0 / depth.max(8.0)).clamp(0.45, 1.45);
         let w_mag = syn.weight.abs().clamp(0.02, 2.4);
+
+        // Non-sampled structural edges render as quiet, thin, low-alpha background filaments
+        // so the <= 22 sampled tracer river wisps remain calm and legible.
+        if !syn.sampled_tracer || river_intensity <= 0.01 {
+            let bg_alpha = (11.0 + w_mag * 12.0).clamp(10.0, 26.0) as u8;
+            let bg_width = (0.42_f32 + w_mag * 0.24) * persp_w;
+            let bg_col = if syn.is_feedback {
+                if syn.weight >= 0.0 {
+                    Color32::from_rgba_unmultiplied(217, 159, 64, bg_alpha)
+                } else {
+                    Color32::from_rgba_unmultiplied(219, 112, 168, bg_alpha)
+                }
+            } else if syn.weight >= 0.0 {
+                Color32::from_rgba_unmultiplied(72, 182, 210, bg_alpha)
+            } else {
+                Color32::from_rgba_unmultiplied(225, 108, 128, bg_alpha)
+            };
+            painter.line_segment([p_from, p_to], Stroke::new(bg_width, bg_col));
+            continue;
+        }
 
         let u_pos = sim.neurons[syn.from].pos;
         let v_pos = sim.neurons[syn.to].pos;
@@ -264,8 +289,8 @@ pub fn draw_neural_space_3d(
             prev_pt = cur_pt;
         }
 
-        // Suspended laminar river droplets drifting smoothly along strong channels
-        if river_intensity > 0.05 && s_idx % 3 == 0 && w_mag > 0.16 {
+        // Suspended laminar river droplets drifting smoothly along the <= 22 sampled tracer wisps
+        if river_intensity > 0.05 && w_mag > 0.14 {
             let u_mote = ((river_phase * 0.14 + fil_phase * 0.21) % 1.0).clamp(0.06, 0.94);
             let mote_env = (u_mote * std::f32::consts::PI).sin();
             let mote_pt = cubic_bezier_2d(p_from, p_q1, p_q2, p_to, u_mote);
@@ -308,11 +333,11 @@ pub fn draw_neural_space_3d(
             role_color(n.role, act_norm, organic)
         };
         if n.opto_clamp == OptoClamp::ChR2Excite {
-            painter.circle_stroke(screen_pos, base_r * 1.48, Stroke::new(2.2, Color32::from_rgb(56, 189, 248)));
+            painter.circle_stroke(screen_pos, base_r * 1.48, Stroke::new(2.2_f32, Color32::from_rgb(56, 189, 248)));
         } else if n.opto_clamp == OptoClamp::NpHRSilence {
-            painter.circle_stroke(screen_pos, base_r * 1.48, Stroke::new(2.2, Color32::from_rgb(192, 132, 252)));
+            painter.circle_stroke(screen_pos, base_r * 1.48, Stroke::new(2.2_f32, Color32::from_rgb(192, 132, 252)));
         } else if n.ablated {
-            painter.line_segment([screen_pos - egui::vec2(base_r*0.7, base_r*0.7), screen_pos + egui::vec2(base_r*0.7, base_r*0.7)], Stroke::new(1.8, Color32::from_rgb(244, 63, 94)));
+            painter.line_segment([screen_pos - egui::vec2(base_r*0.7, base_r*0.7), screen_pos + egui::vec2(base_r*0.7, base_r*0.7)], Stroke::new(1.8_f32, Color32::from_rgb(244, 63, 94)));
         }
         let is_selected = selected_neuron == Some(idx);
 
@@ -350,7 +375,7 @@ pub fn draw_neural_space_3d(
                 outer_rect,
                 2.5,
                 Stroke::new(
-                    if is_selected { 2.6 } else { 1.6 },
+                    if is_selected { 2.6_f32 } else { 1.6_f32 },
                     if is_selected { Color32::WHITE } else { core_color },
                 ),
                 StrokeKind::Outside,
@@ -401,7 +426,7 @@ pub fn draw_neural_space_3d(
                 screen_pos,
                 base_r,
                 Stroke::new(
-                    if is_selected { 2.4 } else { 1.5 },
+                    if is_selected { 2.4_f32 } else { 1.5_f32 },
                     if is_selected { Color32::WHITE } else { core_color },
                 ),
             );
@@ -415,6 +440,11 @@ pub fn draw_neural_space_3d(
                 ),
             );
         }
+    }
+
+    // 5. Render 3D Lamina / Zone Pills AFTER synapses and somata with 2D AABB de-overlapping
+    if show_group_highlights {
+        draw_group_zone_pills(painter, rect, zone_pills);
     }
 
     *hovered_out = best_hover.map(|(idx, _)| idx);
@@ -520,7 +550,7 @@ fn draw_histological_neuron_3d(
             pts,
             Color32::from_rgba_unmultiplied(core_color.r(), core_color.g(), core_color.b(), 155),
             Stroke::new(
-                if is_selected { 2.4 } else { 1.4 },
+                if is_selected { 2.4_f32 } else { 1.4_f32 },
                 if is_selected { Color32::WHITE } else { core_color },
             ),
         ));
@@ -552,7 +582,7 @@ fn draw_histological_neuron_3d(
         painter.circle_stroke(
             screen_pos,
             base_r * 0.88,
-            Stroke::new(if is_selected { 2.3 } else { 1.4 }, core_color),
+            Stroke::new(if is_selected { 2.3_f32 } else { 1.4_f32 }, core_color),
         );
         painter.circle_filled(
             screen_pos,
@@ -584,20 +614,27 @@ fn draw_cortical_surface_planes(
                 cam.project(vp, rect, corners[i]),
                 cam.project(vp, rect, corners[(i + 1) % 4]),
             ) {
-                painter.line_segment([pa, pb], Stroke::new(1.2, col));
+                painter.line_segment([pa, pb], Stroke::new(1.2_f32, col));
             }
         }
     }
 }
 
-fn draw_group_zone_highlights(
+struct ZonePill {
+    pos: Pos2,
+    depth: f32,
+    text: String,
+    col: Color32,
+}
+
+fn draw_group_zone_boxes(
     painter: &Painter,
     rect: Rect,
     sim: &NeuralSpaceSim,
     cam: &OrbitCamera3D,
     vp: &Mat4,
     organic: f32,
-) {
+) -> Vec<ZonePill> {
     let mut groups: BTreeMap<usize, (String, Color32, Vec3, Vec3, usize)> = BTreeMap::new();
 
     for n in &sim.neurons {
@@ -616,6 +653,7 @@ fn draw_group_zone_highlights(
         entry.4 += 1;
     }
 
+    let mut pills = Vec::with_capacity(groups.len());
     for (_k, (title, col, min_v, max_v, count)) in groups {
         let corners = [
             Vec3::new(min_v.x, min_v.y, min_v.z),
@@ -635,7 +673,7 @@ fn draw_group_zone_highlights(
 
         let wire_alpha = if organic > 0.65 { 46 } else { 72 };
         let stroke = Stroke::new(
-            1.0,
+            1.0_f32,
             Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), wire_alpha),
         );
         for (a, b) in edges {
@@ -652,33 +690,117 @@ fn draw_group_zone_highlights(
             max_v.y + 0.65,
             (min_v.z + max_v.z) * 0.5,
         );
-        if let Some((label_pos, _)) = cam.project(vp, rect, top_anchor) {
-            let text = format!("{} ({})", title, count);
-            let pill_w = (text.len() as f32 * 6.5 + 14.0).clamp(84.0, 225.0);
-            let pill_rect = Rect::from_center_size(label_pos, egui::vec2(pill_w, 18.0));
-            painter.rect_filled(
-                pill_rect,
-                4.0,
-                Color32::from_rgba_unmultiplied(10, 16, 30, 212),
-            );
-            painter.rect_stroke(
-                pill_rect,
-                4.0,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 165)),
-                StrokeKind::Outside,
-            );
-            painter.text(
-                label_pos,
-                Align2::CENTER_CENTER,
-                text,
-                FontId::monospace(10.2),
+        if let Some((label_pos, depth)) = cam.project(vp, rect, top_anchor) {
+            pills.push(ZonePill {
+                pos: label_pos,
+                depth,
+                text: format!("{} ({})", title, count),
                 col,
-            );
+            });
         }
+    }
+    pills
+}
+
+fn draw_group_zone_pills(painter: &Painter, rect: Rect, mut pills: Vec<ZonePill>) {
+    // Sort front-to-back during layout so foreground labels stay close to their true 3D anchors
+    pills.sort_by(|a, b| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut placed: Vec<(Rect, ZonePill)> = Vec::with_capacity(pills.len());
+    let pill_h = 18.0_f32;
+    let pad = 6.0_f32;
+
+    for mut pill in pills {
+        let pill_w = (pill.text.len() as f32 * 6.5 + 14.0).clamp(84.0, 236.0);
+        let min_x = rect.min.x + pill_w * 0.5 + pad;
+        let max_x = (rect.max.x - pill_w * 0.5 - pad).max(min_x);
+        let min_y = rect.min.y + pill_h * 0.5 + pad;
+        let max_y = (rect.max.y - pill_h * 0.5 - pad).max(min_y);
+
+        let anchor = Pos2::new(
+            pill.pos.x.clamp(min_x, max_x),
+            pill.pos.y.clamp(min_y, max_y),
+        );
+        let mut chosen = Rect::from_center_size(anchor, egui::vec2(pill_w, pill_h));
+
+        if placed.iter().any(|(r, _)| r.intersects(chosen)) {
+            let mut found = false;
+            for step in 1..=14 {
+                let dy = step as f32 * 21.0;
+                for dir in [-1.0_f32, 1.0_f32] {
+                    let cand_y = (anchor.y + dir * dy).clamp(min_y, max_y);
+                    let cand = Rect::from_center_size(
+                        Pos2::new(anchor.x, cand_y),
+                        egui::vec2(pill_w, pill_h),
+                    );
+                    if !placed.iter().any(|(r, _)| r.intersects(cand)) {
+                        chosen = cand;
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if !found {
+                for step in 1..=6 {
+                    let dx = step as f32 * (pill_w * 0.52);
+                    for dir in [-1.0_f32, 1.0_f32] {
+                        let cand_x = (anchor.x + dir * dx).clamp(min_x, max_x);
+                        let cand = Rect::from_center_size(
+                            Pos2::new(cand_x, anchor.y),
+                            egui::vec2(pill_w, pill_h),
+                        );
+                        if !placed.iter().any(|(r, _)| r.intersects(cand)) {
+                            chosen = cand;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+            }
+        }
+        pill.pos = chosen.center();
+        placed.push((chosen, pill));
+    }
+
+    // Paint back-to-front so closer pills draw cleanly on top if viewport is extremely narrow
+    placed.sort_by(|a, b| {
+        b.1.depth
+            .partial_cmp(&a.1.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for (pill_rect, pill) in placed {
+        painter.rect_filled(
+            pill_rect,
+            4.0,
+            Color32::from_rgba_unmultiplied(10, 16, 30, 226),
+        );
+        painter.rect_stroke(
+            pill_rect,
+            4.0,
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(pill.col.r(), pill.col.g(), pill.col.b(), 175),
+            ),
+            StrokeKind::Outside,
+        );
+        painter.text(
+            pill.pos,
+            Align2::CENTER_CENTER,
+            pill.text,
+            FontId::monospace(10.2),
+            pill.col,
+        );
     }
 }
 
-fn classify_neuron_zone(model: ModelArch, layer: usize, role: NeuronRole) -> (usize, String, Color32) {
+pub fn classify_neuron_zone(model: ModelArch, layer: usize, role: NeuronRole) -> (usize, String, Color32) {
     if model == ModelArch::M13CerebralCortexGreyMatter {
         return match role {
             NeuronRole::SensoryInput => (0, "THALAMIC INPUT".to_string(), Color32::from_rgb(56, 189, 248)),
@@ -692,10 +814,24 @@ fn classify_neuron_zone(model: ModelArch, layer: usize, role: NeuronRole) -> (us
         };
     }
 
+    if model == ModelArch::M14FrontierLlmMoe {
+        return match (layer, role) {
+            (_, NeuronRole::SensoryInput) => (0, "INPUT LAYER".to_string(), Color32::from_rgb(56, 189, 248)),
+            (_, NeuronRole::ReadoutOutput) => (90, "OUTPUT READOUT".to_string(), Color32::from_rgb(250, 204, 21)),
+            (1, _) => (1, "CAUSAL GQA + KV CACHE".to_string(), Color32::from_rgb(52, 211, 153)),
+            (2, _) | (_, NeuronRole::MoeRouter) => {
+                (2, "TOP-2 MoE ROUTER".to_string(), Color32::from_rgb(192, 132, 252))
+            }
+            (3, _) => (3, "SwiGLU EXPERTS".to_string(), Color32::from_rgb(45, 212, 191)),
+            _ => (layer, format!("HIDDEN L{}", layer), Color32::from_rgb(52, 211, 153)),
+        };
+    }
+
     match role {
         NeuronRole::SensoryInput => (0, "INPUT LAYER".to_string(), Color32::from_rgb(56, 189, 248)),
         NeuronRole::ReadoutOutput => (90, "OUTPUT READOUT".to_string(), Color32::from_rgb(250, 204, 21)),
         NeuronRole::GeneratorUnit => (10, "GENERATOR MANIFOLD".to_string(), Color32::from_rgb(192, 132, 252)),
+        NeuronRole::MoeRouter => (12, "TOP-2 MoE ROUTER".to_string(), Color32::from_rgb(192, 132, 252)),
         NeuronRole::DiscriminatorUnit => (20, "DISCRIMINATOR CRITIC".to_string(), Color32::from_rgb(251, 146, 60)),
         NeuronRole::PredictionErrorUnit => (25, "ERROR LAMINA".to_string(), Color32::from_rgb(251, 113, 133)),
         _ => match model {
@@ -759,7 +895,9 @@ fn role_color(role: NeuronRole, act_norm: f32, organic: f32) -> Color32 {
         NeuronRole::MolecularInterneuronL1 => Color32::from_rgb(167, 243, 208),
         NeuronRole::InhibitoryInterneuron => Color32::from_rgb(236, 72u8.saturating_add(boost / 2), 153),
         NeuronRole::ReadoutOutput => Color32::from_rgb(250, 204, 21u8.saturating_add(boost)),
-        NeuronRole::GeneratorUnit => Color32::from_rgb(168, 85, 247u8.saturating_add(boost / 2)),
+        NeuronRole::GeneratorUnit | NeuronRole::MoeRouter => {
+            Color32::from_rgb(168, 85, 247u8.saturating_add(boost / 2))
+        }
         NeuronRole::DiscriminatorUnit => Color32::from_rgb(249, 115, 22u8.saturating_add(boost)),
         NeuronRole::PredictionErrorUnit => Color32::from_rgb(251, 113, 133),
         NeuronRole::CorticalMiniColumn => Color32::from_rgb(45u8.saturating_add(boost), 212, 191),

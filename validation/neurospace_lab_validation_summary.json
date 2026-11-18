@@ -4,9 +4,9 @@
   "version": "1.6.0",
   "preprintId": "APP-PREPRINT-19",
   "slug": "neurospace-lab-3d-neural-cortex",
-  "testsPassed": 5,
-  "testsTotal": 5,
-  "testDurationSec": 0.47,
+  "testsPassed": 13,
+  "testsTotal": 13,
+  "testDurationSec": 2.17,
   "unsafeCode": "forbidden",
   "modelsCount": 15,
   "datasetsCount": 7

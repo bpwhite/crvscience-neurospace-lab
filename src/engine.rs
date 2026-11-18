@@ -15,6 +15,7 @@
 
 use crate::datasets::{BuiltDataset, DatasetId, SampleRecord, TaskKind};
 use crate::models::{HyperParams, ModelArch, OutputGoal};
+use crate::persistence::WorksetEnvelope;
 use glam::Vec3;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
@@ -45,6 +46,7 @@ pub enum NeuronRole {
     SpinyStellateL4,
     ThickPyramidalL5,
     CorticothalamicL6,
+    MoeRouter,
 }
 
 impl NeuronRole {
@@ -64,12 +66,32 @@ impl NeuronRole {
             Self::SpinyStellateL4 => "L4 Spiny Stellate Granule",
             Self::ThickPyramidalL5 => "L5 Thick-Tufted Pyramidal",
             Self::CorticothalamicL6 => "L6 Corticothalamic Fusiform",
+            Self::MoeRouter => "Top-2 MoE Router",
         }
+    }
+
+    pub fn label_for_model(self, model: ModelArch, layer: usize) -> &'static str {
+        if model == ModelArch::M14FrontierLlmMoe {
+            return match (layer, self) {
+                (1, Self::ExcitatoryHidden) => "Causal GQA Head",
+                (1, Self::CorticalMiniColumn) => "KV-Cache Slot",
+                (2, _) | (_, Self::MoeRouter) => "Top-2 MoE Router",
+                (3, Self::ExcitatoryHidden) => "SwiGLU Expert Unit",
+                _ => self.label(),
+            };
+        }
+        self.label()
     }
 
     pub fn is_pyramidal(self) -> bool {
         matches!(self, Self::PyramidalL23 | Self::ThickPyramidalL5)
     }
+}
+
+fn m14_expert_quadrant(n: &NeuronNode) -> usize {
+    let y_bit = if n.rest_pos.y >= 0.0 { 0 } else { 2 };
+    let z_bit = if n.rest_pos.z >= 0.0 { 0 } else { 1 };
+    y_bit + z_bit
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,8 +184,16 @@ pub struct NeuralSpaceSim {
     pub loss_history: Vec<f32>,
     pub metric_history: Vec<f32>,
     pub synapse_history: Vec<usize>,
+    pub lesion_events: Vec<(usize, String)>,
     pub plasticity_log: Vec<String>,
     pub comparison_ledger: Vec<ComparisonRecord>,
+
+    pub moe_expert_gates: [f32; 4],
+    pub moe_expert_usage: [f32; 4],
+    pub attn_weights: Vec<f32>,
+    pub attn_max_weight: f32,
+    pub attn_suppressed_frac: f32,
+    pub pc_mean_free_energy: f32,
 
     pub active_sample: SampleRecord,
     pub last_prediction: Vec<f32>,
@@ -207,8 +237,15 @@ impl NeuralSpaceSim {
             loss_history: Vec::with_capacity(240),
             metric_history: Vec::with_capacity(240),
             synapse_history: Vec::with_capacity(240),
+            lesion_events: Vec::new(),
             plasticity_log: Vec::new(),
             comparison_ledger: Vec::new(),
+            moe_expert_gates: [0.0; 4],
+            moe_expert_usage: [0.25; 4],
+            attn_weights: Vec::new(),
+            attn_max_weight: 0.0,
+            attn_suppressed_frac: 0.0,
+            pc_mean_free_energy: 0.0,
             active_sample,
             last_prediction: vec![0.0; out_dim],
             rng: ChaCha8Rng::seed_from_u64(seed),
@@ -300,7 +337,7 @@ impl NeuralSpaceSim {
                 self.step_simulation();
             }
             self.push_log(format!(
-                "Completed 13-model sweep on locked {}",
+                "Completed 15-model sweep on locked {}",
                 locked_ds.code()
             ));
         } else {
@@ -446,6 +483,13 @@ impl NeuralSpaceSim {
         self.loss_history.clear();
         self.metric_history.clear();
         self.synapse_history.clear();
+        self.lesion_events.clear();
+        self.moe_expert_gates = [0.0; 4];
+        self.moe_expert_usage = [0.25; 4];
+        self.attn_weights.clear();
+        self.attn_max_weight = 0.0;
+        self.attn_suppressed_frac = 0.0;
+        self.pc_mean_free_energy = 0.0;
 
         let in_dim = self.dataset_id.input_dim();
         let out_dim = self.dataset_id.output_dim();
@@ -607,7 +651,7 @@ impl NeuralSpaceSim {
                     let a = (k as f32 / n_router as f32) * std::f32::consts::TAU;
                     router.push(self.alloc_neuron(
                         2,
-                        NeuronRole::GeneratorUnit,
+                        NeuronRole::MoeRouter,
                         Vec3::new(-0.4, a.sin() * 1.5, a.cos() * 1.5),
                     ));
                 }
@@ -920,6 +964,29 @@ impl NeuralSpaceSim {
                             }
                         };
                         self.add_synapse(u, v, w, false);
+                    }
+                }
+            }
+        }
+
+        if self.model == ModelArch::M10PredictiveCoding && hidden_layers.len() >= 2 {
+            let in_copy = self.input_ids.clone();
+            let err_copy = hidden_layers[1].clone();
+            for &u in &in_copy {
+                for &v in &err_copy {
+                    if self.rng.gen::<f32>() < 0.72 {
+                        let w = 0.25 + self.rng.gen::<f32>() * 0.45;
+                        self.add_synapse(u, v, w, false);
+                    }
+                }
+            }
+            let val_copy = hidden_layers[0].clone();
+            let out_copy = self.output_ids.clone();
+            for &u in &val_copy {
+                for &v in &out_copy {
+                    if self.rng.gen::<f32>() < 0.75 {
+                        let w = (self.rng.gen::<f32>() - 0.5) * 0.45;
+                        self.add_synapse(u, v, w, true);
                     }
                 }
             }
@@ -1279,8 +1346,9 @@ impl NeuralSpaceSim {
         }
 
         let passes = match self.model {
-            ModelArch::M13CerebralCortexGreyMatter => 4,
-            ModelArch::M8LiquidTimeConstant
+            ModelArch::M13CerebralCortexGreyMatter | ModelArch::M14FrontierLlmMoe => 4,
+            ModelArch::M3SparseTransformer
+            | ModelArch::M8LiquidTimeConstant
             | ModelArch::M9EchoStateReservoir
             | ModelArch::M10PredictiveCoding
             | ModelArch::M12ConnectomicOrganoid => 3,
@@ -1301,13 +1369,168 @@ impl NeuralSpaceSim {
 
         for _ in 0..passes {
             let mut currents = vec![0.0f32; self.neurons.len()];
+            let is_pc = self.model == ModelArch::M10PredictiveCoding;
+            let mut sensory_cur = if is_pc { vec![0.0f32; self.neurons.len()] } else { Vec::new() };
+            let mut pred_cur = if is_pc { vec![0.0f32; self.neurons.len()] } else { Vec::new() };
+            let mut err_fb_cur = if is_pc { vec![0.0f32; self.neurons.len()] } else { Vec::new() };
+
             for syn in &self.synapses {
                 if syn.severed || self.neurons[syn.from].ablated || self.neurons[syn.to].ablated {
                     continue;
                 }
-                currents[syn.to] += self.neurons[syn.from].activation * syn.weight;
+                let contrib = self.neurons[syn.from].activation * syn.weight;
+                currents[syn.to] += contrib;
+                if is_pc {
+                    let src = &self.neurons[syn.from];
+                    if src.layer == 0 || src.role == NeuronRole::SensoryInput {
+                        sensory_cur[syn.to] += contrib;
+                    } else if src.role == NeuronRole::PredictionErrorUnit {
+                        err_fb_cur[syn.to] += contrib;
+                    } else if src.layer == 1 || src.role == NeuronRole::ReadoutOutput {
+                        pred_cur[syn.to] += contrib;
+                    }
+                }
             }
 
+            // M14 Frontier LLM: Top-2 Sparse MoE Router gating across 4 YZ Expert Quadrants
+            if self.model == ModelArch::M14FrontierLlmMoe {
+                let mut logits = [f32::NEG_INFINITY; 4];
+                let mut sums = [0.0f32; 4];
+                let mut counts = [0usize; 4];
+                for syn in &self.synapses {
+                    if syn.severed || self.neurons[syn.from].ablated || self.neurons[syn.to].ablated {
+                        continue;
+                    }
+                    if self.neurons[syn.from].layer == 2 && self.neurons[syn.to].layer == 3 {
+                        let q = m14_expert_quadrant(&self.neurons[syn.to]);
+                        sums[q] += self.neurons[syn.from].activation * syn.weight;
+                        counts[q] += 1;
+                    }
+                }
+                let mut active_quads = Vec::with_capacity(4);
+                for q in 0..4 {
+                    if counts[q] > 0 {
+                        logits[q] = sums[q] / (counts[q] as f32).sqrt();
+                        active_quads.push(q);
+                    }
+                }
+                if active_quads.is_empty() {
+                    self.moe_expert_gates = [0.0; 4];
+                } else if active_quads.len() == 1 {
+                    let mut gates = [0.0f32; 4];
+                    gates[active_quads[0]] = 1.0;
+                    self.moe_expert_gates = gates;
+                } else {
+                    let max_l = active_quads
+                        .iter()
+                        .map(|&q| logits[q])
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let mut probs = [0.0f32; 4];
+                    let mut sum_exp = 0.0f32;
+                    for &q in &active_quads {
+                        let e = (logits[q] - max_l).exp();
+                        probs[q] = e;
+                        sum_exp += e;
+                    }
+                    let sum_exp = sum_exp.max(1e-6);
+                    for &q in &active_quads {
+                        probs[q] /= sum_exp;
+                    }
+                    active_quads.sort_by(|&a, &b| {
+                        probs[b]
+                            .partial_cmp(&probs[a])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.cmp(&b))
+                    });
+                    let t1 = active_quads[0];
+                    let t2 = active_quads[1];
+                    let top_sum = (probs[t1] + probs[t2]).max(1e-6);
+                    let mut gates = [0.0f32; 4];
+                    gates[t1] = probs[t1] / top_sum;
+                    gates[t2] = probs[t2] / top_sum;
+                    self.moe_expert_gates = gates;
+                }
+            }
+
+            // M3 Sparse Transformer: Per-head Q/K scaled softmax & competitive top-k suppression
+            let mut l1_attn = Vec::new();
+            let mut l1_head_len = Vec::new();
+            if self.model == ModelArch::M3SparseTransformer {
+                l1_attn.resize(self.neurons.len(), 0.0);
+                l1_head_len.resize(self.neurons.len(), 1);
+                let mut heads: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for (idx, n) in self.neurons.iter().enumerate() {
+                    if n.layer == 1 && !n.ablated && n.opto_clamp == OptoClamp::None {
+                        let h = if n.rest_pos.x < -3.1 {
+                            0
+                        } else if n.rest_pos.x < -2.45 {
+                            1
+                        } else {
+                            2
+                        };
+                        heads[h].push(idx);
+                    }
+                }
+                self.attn_weights.clear();
+                let mut max_w = 0.0f32;
+                let mut suppressed = 0usize;
+                let mut total_l1 = 0usize;
+                for head in &heads {
+                    if head.is_empty() {
+                        continue;
+                    }
+                    let h_len = head.len();
+                    total_l1 += h_len;
+                    let scores: Vec<f32> = head
+                        .iter()
+                        .map(|&idx| (currents[idx] + self.neurons[idx].bias) * 1.8)
+                        .collect();
+                    let max_s = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let exps: Vec<f32> = scores.iter().map(|&s| (s - max_s).exp()).collect();
+                    let sum_e: f32 = exps.iter().sum::<f32>().max(1e-6);
+                    let alphas: Vec<f32> = exps.into_iter().map(|e| e / sum_e).collect();
+
+                    let k_keep = (h_len / 2).max(1);
+                    let mut order: Vec<(usize, f32)> =
+                        alphas.iter().copied().enumerate().collect();
+                    order.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                    let mut keep_mask = vec![false; h_len];
+                    for &(pos, _) in order.iter().take(k_keep) {
+                        keep_mask[pos] = true;
+                    }
+                    let kept_sum: f32 = alphas
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| keep_mask[*i])
+                        .map(|(_, &a)| a)
+                        .sum::<f32>()
+                        .max(1e-6);
+                    for (pos, &idx) in head.iter().enumerate() {
+                        let w = if keep_mask[pos] {
+                            alphas[pos] / kept_sum
+                        } else {
+                            suppressed += 1;
+                            0.0
+                        };
+                        l1_attn[idx] = w;
+                        l1_head_len[idx] = h_len;
+                        max_w = max_w.max(w);
+                        self.attn_weights.push(w);
+                    }
+                }
+                self.attn_max_weight = max_w;
+                self.attn_suppressed_frac = if total_l1 > 0 {
+                    suppressed as f32 / total_l1 as f32
+                } else {
+                    0.0
+                };
+            }
+
+            let moe_gates = self.moe_expert_gates;
             for (idx, n) in self.neurons.iter_mut().enumerate() {
                 if n.ablated {
                     n.activation = 0.0;
@@ -1329,6 +1552,50 @@ impl NeuralSpaceSim {
                 }
                 let drive = currents[idx] + n.bias;
                 n.activation = match self.model {
+                    ModelArch::M14FrontierLlmMoe if n.role != NeuronRole::ReadoutOutput => {
+                        if n.layer == 1 && n.role == NeuronRole::CorticalMiniColumn {
+                            n.membrane_v = (n.membrane_v * 0.80 + drive * 0.45).clamp(-3.0, 3.0);
+                            n.membrane_v.tanh()
+                        } else if n.layer == 1 || n.layer == 2 {
+                            drive.tanh()
+                        } else if n.layer == 3 {
+                            let g = moe_gates[m14_expert_quadrant(n)];
+                            if g > 0.0 {
+                                let silu = drive / (1.0 + (-drive).exp());
+                                let gate_b = (0.5 * drive + n.bias).tanh();
+                                n.membrane_v = g;
+                                (g * 1.45 * silu * (1.0 + 0.5 * gate_b)).clamp(-2.2, 2.2)
+                            } else {
+                                n.membrane_v *= 0.5;
+                                0.0
+                            }
+                        } else {
+                            drive.tanh()
+                        }
+                    }
+                    ModelArch::M3SparseTransformer if n.role != NeuronRole::ReadoutOutput => {
+                        if n.layer == 1 {
+                            let a = l1_attn[idx];
+                            if a <= 0.0 {
+                                0.0
+                            } else {
+                                let h_len = l1_head_len[idx].max(1) as f32;
+                                (a * h_len * drive.tanh()).clamp(-2.2, 2.2)
+                            }
+                        } else {
+                            let silu = drive / (1.0 + (-drive).exp());
+                            silu.clamp(-2.2, 2.2)
+                        }
+                    }
+                    ModelArch::M10PredictiveCoding if n.role != NeuronRole::ReadoutOutput => {
+                        if n.role == NeuronRole::PredictionErrorUnit {
+                            (sensory_cur[idx] - pred_cur[idx] + n.bias * 0.25).clamp(-2.2, 2.2)
+                        } else {
+                            (n.activation * 0.55
+                                + (sensory_cur[idx] + err_fb_cur[idx] + n.bias).tanh() * 0.45)
+                                .clamp(-2.2, 2.2)
+                        }
+                    }
                     ModelArch::M13CerebralCortexGreyMatter if n.role != NeuronRole::ReadoutOutput => {
                         // Two-compartment Larkum pyramidal apical-basal coincidence integration
                         n.membrane_v = n.membrane_v * 0.72 + drive * 0.52;
@@ -1377,6 +1644,23 @@ impl NeuralSpaceSim {
                     }
                 };
             }
+        }
+
+        if self.model == ModelArch::M14FrontierLlmMoe {
+            for e in 0..4 {
+                let inc = if self.moe_expert_gates[e] > 0.0 { 0.05 } else { 0.0 };
+                self.moe_expert_usage[e] = self.moe_expert_usage[e] * 0.95 + inc;
+            }
+        } else if self.model == ModelArch::M10PredictiveCoding {
+            let mut sum_sq = 0.0f32;
+            let mut cnt = 0usize;
+            for n in &self.neurons {
+                if !n.ablated && n.role == NeuronRole::PredictionErrorUnit {
+                    sum_sq += n.activation * n.activation;
+                    cnt += 1;
+                }
+            }
+            self.pc_mean_free_energy = if cnt > 0 { sum_sq / cnt as f32 } else { 0.0 };
         }
 
         let raw_out: Vec<f32> = self
@@ -1465,6 +1749,15 @@ impl NeuralSpaceSim {
                     let deriv = (1.0 - src_act.tanh().powi(2)).max(0.08);
                     self.neurons[syn.from].grad =
                         (self.neurons[syn.from].grad + dst_grad * syn.weight * deriv).clamp(-3.0, 3.0);
+                }
+            }
+
+            if self.model == ModelArch::M14FrontierLlmMoe {
+                let gates = self.moe_expert_gates;
+                for n in &mut self.neurons {
+                    if n.layer == 3 && n.opto_clamp == OptoClamp::None && gates[m14_expert_quadrant(n)] == 0.0 {
+                        n.grad = 0.0;
+                    }
                 }
             }
 
@@ -1757,12 +2050,21 @@ impl NeuralSpaceSim {
             let uid = self.neurons[idx].id;
             self.evaluate_validation_metrics();
             self.acute_lesion_metric = Some(self.primary_metric);
+            self.record_lesion_event("Ablate");
             self.push_log(format!("Ablated Soma #{} ({})", uid, role.label()));
         } else {
             self.neurons[idx].ablated = false;
             let uid = self.neurons[idx].id;
             self.evaluate_validation_metrics();
             self.push_log(format!("Re-innervated Soma #{}", uid));
+        }
+    }
+
+    fn record_lesion_event(&mut self, tag: &str) {
+        let idx = self.metric_history.len().saturating_sub(1);
+        self.lesion_events.push((idx, tag.to_string()));
+        if self.lesion_events.len() > 32 {
+            self.lesion_events.remove(0);
         }
     }
 
@@ -1796,6 +2098,7 @@ impl NeuralSpaceSim {
         if count > 0 {
             self.evaluate_validation_metrics();
             self.acute_lesion_metric = Some(self.primary_metric);
+            self.record_lesion_event("SeverFB");
             self.push_log(format!("Feedback tractotomy: severed {} reverse axons", count));
         }
         count
@@ -1817,6 +2120,7 @@ impl NeuralSpaceSim {
         if count > 0 {
             self.evaluate_validation_metrics();
             self.acute_lesion_metric = Some(self.primary_metric);
+            self.record_lesion_event("SeverLat");
             self.push_log(format!("Lateral/skip tractotomy: severed {} axons", count));
         }
         count
@@ -1864,6 +2168,7 @@ impl NeuralSpaceSim {
         self.sprout_compensatory_bypass(4);
         self.evaluate_validation_metrics();
         self.acute_lesion_metric = Some(self.primary_metric);
+        self.record_lesion_event("Stroke");
         self.push_log(format!(
             "Focal 3D lesion: ablated {} somata + sprouted bypass collateral",
             hit
@@ -1914,6 +2219,7 @@ impl NeuralSpaceSim {
         }
         self.pre_lesion_metric = None;
         self.acute_lesion_metric = None;
+        self.lesion_events.clear();
         self.evaluate_validation_metrics();
         self.push_log("Restored all ablated somata, severed tracts & opto-clamps".to_string());
     }
@@ -1922,6 +2228,146 @@ impl NeuralSpaceSim {
         for n in &mut self.neurons {
             n.opto_clamp = OptoClamp::None;
         }
+    }
+
+    /// Restores exact network topology, weights, ablations, clamps, severed tracts, and histories
+    /// from a verified `WorksetEnvelope`, falling back to topology rebuild only for legacy envelopes.
+    pub fn apply_workset_envelope(&mut self, env: &WorksetEnvelope) -> Result<(), String> {
+        let n_len = env.neurons.len();
+        if n_len > 0 {
+            for (s_idx, syn) in env.synapses.iter().enumerate() {
+                if syn.from >= n_len || syn.to >= n_len {
+                    return Err(format!(
+                        "Corrupt workset synapse #{s_idx}: endpoint out of bounds ({} -> {} with {n_len} neurons)",
+                        syn.from, syn.to
+                    ));
+                }
+            }
+        }
+
+        self.model = env.model;
+        self.dataset_id = env.dataset;
+        self.goal = env.goal;
+        self.params = env.params.clone();
+        self.dataset_locked = env.dataset_locked;
+        self.model_locked = env.model_locked;
+        self.dataset = BuiltDataset::generate(env.dataset, 2026, env.params.input_noise);
+        self.active_sample = self.dataset.val[0].clone();
+        self.comparison_ledger = env.comparison_ledger.clone();
+        self.lesion_events = env.lesion_events.clone();
+        self.opto_clamp_drive = env.opto_clamp_drive.unwrap_or(1.10);
+        self.moe_expert_gates = [0.0; 4];
+        self.moe_expert_usage = [0.25; 4];
+        self.attn_weights.clear();
+        self.attn_max_weight = 0.0;
+        self.attn_suppressed_frac = 0.0;
+        self.pc_mean_free_energy = 0.0;
+
+        if n_len > 0 {
+            self.neurons = env.neurons.clone();
+            self.synapses = env.synapses.clone();
+            let valid_ids = |ids: &[usize]| {
+                !ids.is_empty() && ids.iter().all(|&id| id < n_len)
+            };
+            self.input_ids = if valid_ids(&env.input_ids) {
+                env.input_ids.clone()
+            } else {
+                self.neurons
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.role == NeuronRole::SensoryInput)
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+            self.output_ids = if valid_ids(&env.output_ids) {
+                env.output_ids.clone()
+            } else {
+                self.neurons
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.role == NeuronRole::ReadoutOutput)
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+            self.next_neuron_uid = self
+                .neurons
+                .iter()
+                .map(|n| n.id)
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(0);
+            self.step_count = env.step_count;
+            self.epoch_count = env.epoch_count;
+            self.primary_metric = env.primary_metric;
+            self.current_loss = env.current_loss;
+            self.pruned_total = env.pruned_total;
+            self.sprouted_total = env.sprouted_total;
+            self.neurogenesis_total = env.neurogenesis_total;
+            self.apoptosis_total = env.apoptosis_total;
+            self.pre_lesion_metric = env.pre_lesion_metric;
+            self.acute_lesion_metric = env.acute_lesion_metric;
+            self.loss_history = env.loss_history.clone();
+            self.metric_history = env.metric_history.clone();
+            self.synapse_history = env.synapse_history.clone();
+            self.metabolic_flux = env.metabolic_flux.unwrap_or_else(|| {
+                let act_energy: f32 = self.neurons.iter().map(|n| n.activation.abs()).sum::<f32>()
+                    / self.neurons.len().max(1) as f32;
+                let syn_load = self.synapses.len() as f32 / 250.0;
+                (0.55 * act_energy + 0.45 * syn_load).clamp(0.05, 2.5)
+            });
+            self.adversarial_margin = env
+                .adversarial_margin
+                .unwrap_or_else(|| (100.0 - self.current_loss * 38.0).clamp(10.0, 99.0));
+
+            if !env.last_prediction.is_empty() {
+                self.last_prediction = env.last_prediction.clone();
+            } else {
+                self.last_prediction = self
+                    .output_ids
+                    .iter()
+                    .map(|&oid| self.neurons[oid].activation)
+                    .collect();
+            }
+            if self.synapses.iter().filter(|s| s.sampled_tracer).count() > 22 {
+                self.refresh_flow_sample();
+            }
+            self.push_log(format!(
+                "Restored exact workset {} / {} (step {}, {} somata, {} syn)",
+                self.model.code(),
+                self.dataset_id.code(),
+                self.step_count,
+                self.neurons.len(),
+                self.synapses.len()
+            ));
+        } else {
+            self.rebuild_topology(false);
+            self.step_count = env.step_count;
+            self.primary_metric = env.primary_metric;
+            self.current_loss = env.current_loss;
+            self.lesion_events = env.lesion_events.clone();
+            self.metabolic_flux = env.metabolic_flux.unwrap_or_else(|| {
+                let act_energy: f32 = self.neurons.iter().map(|n| n.activation.abs()).sum::<f32>()
+                    / self.neurons.len().max(1) as f32;
+                let syn_load = self.synapses.len() as f32 / 250.0;
+                (0.55 * act_energy + 0.45 * syn_load).clamp(0.05, 2.5)
+            });
+            self.adversarial_margin = env
+                .adversarial_margin
+                .unwrap_or_else(|| (100.0 - self.current_loss * 38.0).clamp(10.0, 99.0));
+            if !env.last_prediction.is_empty() {
+                self.last_prediction = env.last_prediction.clone();
+            } else {
+                let held_feats = self.active_sample.features.clone();
+                self.last_prediction = self.forward_sample(&held_feats, false);
+            }
+            self.push_log(format!(
+                "Restored legacy workset {} / {} (step {})",
+                self.model.code(),
+                self.dataset_id.code(),
+                self.step_count
+            ));
+        }
+        Ok(())
     }
 
     pub fn evaluate_validation_metrics(&mut self) {
@@ -1970,6 +2416,14 @@ impl NeuralSpaceSim {
         self.metric_history.push(self.primary_metric);
         if self.metric_history.len() > 180 {
             self.metric_history.remove(0);
+            self.lesion_events.retain_mut(|(idx, _)| {
+                if *idx > 0 {
+                    *idx -= 1;
+                    true
+                } else {
+                    false
+                }
+            });
         }
         self.synapse_history.push(self.synapses.len());
         if self.synapse_history.len() > 180 {

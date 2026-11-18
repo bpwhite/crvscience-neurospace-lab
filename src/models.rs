@@ -39,7 +39,7 @@ impl ModelTier {
     }
 }
 
-/// Thirteen neural architectures culminating in 6-layered 3D Neocortical Grey Matter (L1-L6).
+/// Fifteen neural architectures culminating in 6-layered 3D Neocortical Grey Matter (L1-L6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModelArch {
     M0MinimalPerceptron,

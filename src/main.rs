@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://gnu.org>.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![deny(unsafe_code)]
 
 use clap::{Parser, Subcommand};
 use neurospace_lab::datasets::DatasetId;
@@ -46,7 +47,7 @@ struct Cli {
 enum Commands {
     /// Launch the interactive 3D Neural Space GUI workstation (default)
     Gui,
-    /// Lock a dataset and benchmark all 13 neural network models headlessly
+    /// Lock a dataset and benchmark all 15 neural network models headlessly
     BenchDataset {
         /// Dataset code (D1..D7)
         #[arg(short, long, default_value = "D4")]
@@ -57,7 +58,7 @@ enum Commands {
     },
     /// Lock a neural network model and benchmark all 7 datasets headlessly
     BenchModel {
-        /// Model code (M1..M13)
+        /// Model code (M0..M14)
         #[arg(short, long, default_value = "M13")]
         model: String,
         /// Training steps per dataset
@@ -82,7 +83,26 @@ fn parse_model(code: &str) -> ModelArch {
         .unwrap_or(ModelArch::M13CerebralCortexGreyMatter)
 }
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn attach_parent_console_if_cli() {
+    if std::env::args_os().len() > 1 {
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        extern "system" {
+            fn AttachConsole(dw_process_id: u32) -> i32;
+        }
+        // SAFETY: Called once at process startup on Windows when CLI arguments are present
+        // so stdout/stderr attach to the parent terminal under `windows_subsystem = "windows"`.
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    attach_parent_console_if_cli();
+
     let cli = Cli::parse();
 
     if let Some(out_path) = cli.headless_screenshot {
@@ -96,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 viewport: egui::ViewportBuilder::default()
                     .with_inner_size([1440.0, 900.0])
                     .with_min_inner_size([1024.0, 680.0])
+                    .with_icon(std::sync::Arc::new(neurospace_lab::icon::app_egui_icon()))
                     .with_title("NeuroSpace Lab v1.6.0 — 3D Neural Topology & Cerebral Cortex Grey-Matter Workstation"),
                 ..Default::default()
             };

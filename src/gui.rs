@@ -40,13 +40,27 @@ pub struct NeuroSpaceApp {
     pub selected_neuron: Option<usize>,
     pub probe_tool: ProbeTool,
     pub show_bottom_matrix: bool,
+    pub show_about_modal: bool,
     pub status_banner: String,
     store: Option<LabStore>,
 }
 
 impl NeuroSpaceApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self::new_with_store(LabStore::open("neurospace_lab.sqlite").ok())
+        let (store, err_msg) = match LabStore::open("neurospace_lab.sqlite") {
+            Ok(st) => (Some(st), None),
+            Err(e) => (
+                None,
+                Some(format!(
+                    "SQLite WAL store unavailable ({e}); running in-memory."
+                )),
+            ),
+        };
+        let mut app = Self::new_with_store(store);
+        if let Some(msg) = err_msg {
+            app.status_banner = msg;
+        }
+        app
     }
 
     pub fn new_headless() -> Self {
@@ -71,40 +85,112 @@ impl NeuroSpaceApp {
             selected_neuron: None,
             probe_tool: ProbeTool::Inspect,
             show_bottom_matrix: true,
+            show_about_modal: false,
             status_banner: "Ready — Drag 3D Neural Space to orbit, scroll to zoom, F5/F9 to save/load."
                 .to_string(),
             store,
         }
     }
 
-    fn quick_save(&mut self) {
-        let env = WorksetEnvelope::from_sim(&self.sim, self.render_mode, self.manual_organic_blend);
-        if let Some(st) = &self.store {
-            if st.save_slot("quicksave_f5", &env).is_ok() {
+    fn apply_workset_envelope(&mut self, env: WorksetEnvelope, source_desc: &str) {
+        let render_mode = env.render_mode;
+        let manual_blend = env.manual_organic_blend;
+        match self.sim.apply_workset_envelope(&env) {
+            Ok(()) => {
+                self.render_mode = render_mode;
+                self.manual_organic_blend = manual_blend;
+                self.selected_neuron = None;
+                self.hovered_neuron = None;
                 self.status_banner = format!(
-                    "Saved slot 'quicksave_f5' (SHA-256 {}…)",
-                    &env.sha256_digest[..10]
+                    "Restored verified {source_desc} (step {}, {} somata, {} syn).",
+                    self.sim.step_count,
+                    self.sim.neurons.len(),
+                    self.sim.synapses.len()
                 );
+            }
+            Err(e) => {
+                self.status_banner = format!("Failed to restore {source_desc}: {e}");
             }
         }
     }
 
-    fn quick_load(&mut self) {
+    fn quick_save(&mut self) {
+        let env = WorksetEnvelope::from_sim(&self.sim, self.render_mode, self.manual_organic_blend);
         if let Some(st) = &self.store {
-            if let Ok(Some(env)) = st.load_slot("quicksave_f5") {
-                if env.verify_digest() {
-                    self.sim.dataset_locked = false;
-                    self.sim.model_locked = false;
-                    self.sim.params = env.params;
-                    self.sim.goal = env.goal;
-                    self.sim.select_dataset(env.dataset, 2026);
-                    self.sim.select_model(env.model);
-                    self.sim.dataset_locked = env.dataset_locked;
-                    self.sim.model_locked = env.model_locked;
-                    self.sim.comparison_ledger = env.comparison_ledger;
-                    self.render_mode = env.render_mode;
-                    self.manual_organic_blend = env.manual_organic_blend;
-                    self.status_banner = "Restored verified 'quicksave_f5' workset.".to_string();
+            match st.save_slot("quicksave_f5", &env) {
+                Ok(()) => {
+                    let prefix = &env.sha256_digest[..10.min(env.sha256_digest.len())];
+                    self.status_banner = format!("Saved slot 'quicksave_f5' (SHA-256 {prefix}...)");
+                }
+                Err(e) => {
+                    self.status_banner = format!("QuickSave failed for 'quicksave_f5': {e}");
+                }
+            }
+        } else {
+            self.status_banner = "QuickSave unavailable: SQLite store is not active.".to_string();
+        }
+    }
+
+    fn quick_load(&mut self) {
+        let loaded = if let Some(st) = &self.store {
+            st.load_slot("quicksave_f5")
+        } else {
+            self.status_banner = "QuickLoad unavailable: SQLite store is not active.".to_string();
+            return;
+        };
+        match loaded {
+            Ok(Some(env)) => {
+                if !env.verify_digest() {
+                    self.status_banner =
+                        "Checksum verification failed for slot 'quicksave_f5'.".to_string();
+                    return;
+                }
+                self.apply_workset_envelope(env, "slot 'quicksave_f5'");
+            }
+            Ok(None) => {
+                self.status_banner = "No saved 'quicksave_f5' slot found.".to_string();
+            }
+            Err(e) => {
+                self.status_banner = format!("QuickLoad failed for 'quicksave_f5': {e}");
+            }
+        }
+    }
+
+    fn export_workset_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("NeuroSpace Workset", &["neuroworkset.json", "json"])
+            .set_file_name("session.neuroworkset.json")
+            .save_file()
+        {
+            let env =
+                WorksetEnvelope::from_sim(&self.sim, self.render_mode, self.manual_organic_blend);
+            match env.save_to_file(&path) {
+                Ok(()) => {
+                    let prefix = &env.sha256_digest[..10.min(env.sha256_digest.len())];
+                    self.status_banner = format!(
+                        "Exported workset '{}' (SHA-256 {prefix}...).",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    self.status_banner = e;
+                }
+            }
+        }
+    }
+
+    fn import_workset_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("NeuroSpace Workset", &["json"])
+            .pick_file()
+        {
+            match WorksetEnvelope::load_from_file(&path) {
+                Ok(env) => {
+                    let desc = format!("workset '{}'", path.display());
+                    self.apply_workset_envelope(env, &desc);
+                }
+                Err(e) => {
+                    self.status_banner = e;
                 }
             }
         }
@@ -135,15 +221,16 @@ impl NeuroSpaceApp {
             ctx.request_repaint();
         }
 
-        // Top Bar
+        // Top Bar (2 clean rows so KPI labels never clip or split mid-phrase)
         egui::TopBottomPanel::top("top_hud_bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.heading(
-                    RichText::new("NEUROSPACE 3D LAB v1.6.0").color(Color32::from_rgb(56, 189, 248)),
+                    RichText::new("NEUROSPACE 3D LAB v1.6.0")
+                        .color(Color32::from_rgb(56, 189, 248)),
                 );
                 ui.separator();
                 if ui
-                    .button(if self.running { "⏸ Pause" } else { "▶ Run" })
+                    .button(if self.running { "|| Pause" } else { "▶ Run" })
                     .clicked()
                 {
                     self.running = !self.running;
@@ -161,8 +248,13 @@ impl NeuroSpaceApp {
                 ui.separator();
                 if ui.button("📸 Snapshot Run").clicked() {
                     self.sim.record_snapshot("ManualPin");
-                    if let (Some(st), Some(last)) = (&self.store, self.sim.comparison_ledger.last()) {
-                        let _ = st.append_comparison(last);
+                    if let (Some(st), Some(last)) =
+                        (&self.store, self.sim.comparison_ledger.last())
+                    {
+                        if let Err(e) = st.append_comparison(last) {
+                            self.status_banner =
+                                format!("Snapshot pinned in memory, SQLite append failed: {e}");
+                        }
                     }
                 }
                 let sweep_label = if self.sim.dataset_locked && !self.sim.model_locked {
@@ -175,21 +267,60 @@ impl NeuroSpaceApp {
                 }
 
                 ui.separator();
-                ui.checkbox(&mut self.show_group_highlights, "🔲 Layer/Lamina Zones");
+                if ui.button("Export Workset...").clicked() {
+                    self.export_workset_dialog();
+                }
+                if ui.button("Import Workset...").clicked() {
+                    self.import_workset_dialog();
+                }
+            });
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.show_group_highlights, "Layer/Lamina Zones");
                 ui.checkbox(&mut self.show_bottom_matrix, "📊 Lock Matrix");
+                ui.separator();
+
+                let kpi_col = Color32::from_rgb(167, 243, 208);
+                ui.label(RichText::new(format!("Step {}", self.sim.step_count)).color(kpi_col));
+                ui.label("|");
+                ui.label(
+                    RichText::new(format!("Somata {}", self.sim.neurons.len())).color(kpi_col),
+                );
+                ui.label("|");
+                ui.label(
+                    RichText::new(format!("Synapses {}", self.sim.synapses.len())).color(kpi_col),
+                );
+                ui.label("|");
                 ui.label(
                     RichText::new(format!(
-                        "Step {} | Somata {} | Synapses {} | {}: {:.1}% | {}: {:.3}",
-                        self.sim.step_count,
-                        self.sim.neurons.len(),
-                        self.sim.synapses.len(),
+                        "{}: {:.1}%",
                         self.sim.dataset_id.task_kind().primary_metric_label(),
-                        self.sim.primary_metric,
+                        self.sim.primary_metric
+                    ))
+                    .strong()
+                    .color(Color32::from_rgb(52, 211, 153)),
+                );
+                ui.label("|");
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {:.3}",
                         self.sim.dataset_id.task_kind().loss_label(),
                         self.sim.current_loss
                     ))
-                    .color(Color32::from_rgb(167, 243, 208)),
+                    .strong()
+                    .color(Color32::from_rgb(251, 191, 36)),
                 );
+
+                let ablated = self.sim.ablated_count();
+                let severed = self.sim.severed_count();
+                if ablated > 0 || severed > 0 {
+                    ui.label("|");
+                    ui.label(
+                        RichText::new(format!("Ablated {ablated} | Severed {severed}"))
+                            .color(Color32::from_rgb(251, 113, 133)),
+                    );
+                }
             });
         });
 
@@ -382,8 +513,8 @@ impl NeuroSpaceApp {
                         ui.horizontal_wrapped(|ui| {
                             ui.selectable_value(&mut self.probe_tool, ProbeTool::Inspect, "🔍 Inspect");
                             ui.selectable_value(&mut self.probe_tool, ProbeTool::AblateLesion, "✂ Ablate");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "🔆 ChR2 (+)");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "🟣 NpHR (-)");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "[+] ChR2 (+)");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "[-] NpHR (-)");
                         });
                         ui.add(
                             egui::Slider::new(&mut self.sim.opto_clamp_drive, 0.2..=1.8)
@@ -415,6 +546,7 @@ impl NeuroSpaceApp {
                                 "Lesion Recovery: Pre {:.1}% -> Acute {:.1}% -> Now {:.1}%",
                                 pre, acute, self.sim.primary_metric
                             ));
+                            draw_lesion_recovery_bar(ui, pre, acute, self.sim.primary_metric);
                         }
                     });
 
@@ -423,13 +555,26 @@ impl NeuroSpaceApp {
                 });
             });
 
+        // Always-visible slim bottom footer bar (Copyright + About modal trigger + status)
+        egui::TopBottomPanel::bottom("copyright_footer_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.small(&self.status_banner);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("About").clicked() {
+                        self.show_about_modal = true;
+                    }
+                    ui.small("Copyright CRV Science Network | GPL-3.0-or-later");
+                });
+            });
+        });
+
         // Bottom Panel
         if self.show_bottom_matrix {
             egui::TopBottomPanel::bottom("bottom_lock_matrix")
-                .default_height(185.0)
+                .default_height(210.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    ui.columns(2, |cols| {
+                    ui.columns(3, |cols| {
                         cols[0].strong(format!(
                             "Live Sample Inspector — {} ({})",
                             self.sim.dataset_id.code(),
@@ -457,8 +602,37 @@ impl NeuroSpaceApp {
                             cols[0].small(RichText::new(msg).color(Color32::from_rgb(125, 211, 252)));
                         }
 
-                        cols[1].strong("Locked Dataset / Locked Model Comparison Ledger");
-                        ScrollArea::vertical().max_height(145.0).show(&mut cols[1], |ui| {
+                        cols[1].strong("Live Telemetry Sparklines (Metric, Loss & Lesion)");
+                        draw_sparkline(
+                            &mut cols[1],
+                            self.sim.dataset_id.task_kind().primary_metric_label(),
+                            &self.sim.metric_history,
+                            Color32::from_rgb(52, 211, 153),
+                            true,
+                            self.sim.pre_lesion_metric,
+                            self.sim.acute_lesion_metric,
+                            &self.sim.lesion_events,
+                            format!("{:.1}%", self.sim.primary_metric),
+                        );
+                        cols[1].add_space(4.0);
+                        draw_sparkline(
+                            &mut cols[1],
+                            &format!(
+                                "{} (Syn: {})",
+                                self.sim.dataset_id.task_kind().loss_label(),
+                                self.sim.synapses.len()
+                            ),
+                            &self.sim.loss_history,
+                            Color32::from_rgb(251, 191, 36),
+                            false,
+                            None,
+                            None,
+                            &[],
+                            format!("{:.3}", self.sim.current_loss),
+                        );
+
+                        cols[2].strong("Locked Dataset / Locked Model Comparison Ledger");
+                        ScrollArea::vertical().max_height(168.0).show(&mut cols[2], |ui| {
                             egui::Grid::new("comparison_ledger_grid")
                                 .striped(true)
                                 .show(ui, |ui| {
@@ -553,7 +727,7 @@ impl NeuroSpaceApp {
                         format!(
                             "Soma #{} [{}] (L{})\nPos: ({:+.1}, {:+.1}, {:+.1}) | Ca2+: {:.2}\nAct: {:+.3} | Vm: {:+.3} | Bias: {:+.3}\nUtility: {:.3} | Grad: {:+.3}",
                             n.id,
-                            n.role.label(),
+                            n.role.label_for_model(self.sim.model, n.layer),
                             n.layer,
                             n.pos.x,
                             n.pos.y,
@@ -571,7 +745,220 @@ impl NeuroSpaceApp {
                 }
             }
         });
+
+        if self.show_about_modal {
+            let mut open = self.show_about_modal;
+            egui::Window::new("About NeuroSpace Lab")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading(
+                        RichText::new("NeuroSpace Lab v1.6.0")
+                            .color(Color32::from_rgb(56, 189, 248)),
+                    );
+                    ui.label("3D Neural Network Topology, Plasticity & Cerebral Cortex Wetware Lab");
+                    ui.separator();
+                    ui.strong("Copyright CRV Science Network");
+                    ui.small(
+                        "Licensed under GNU General Public License v3.0 or later (GPL-3.0-or-later).",
+                    );
+                    ui.small("Distributed in the hope that it will be useful, WITHOUT ANY WARRANTY.");
+                    ui.add_space(6.0);
+                    ui.hyperlink_to("CRV Science Network — https://crvscience.com", "https://crvscience.com");
+                    ui.hyperlink_to("CRV Science Public Apps — https://crvscience.com/apps", "https://crvscience.com/apps");
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        self.show_about_modal = false;
+                    }
+                });
+            if !open {
+                self.show_about_modal = false;
+            }
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sparkline(
+    ui: &mut egui::Ui,
+    title: &str,
+    data: &[f32],
+    color: Color32,
+    is_percent: bool,
+    pre_lesion: Option<f32>,
+    acute_lesion: Option<f32>,
+    lesion_events: &[(usize, String)],
+    current_text: String,
+) {
+    let avail_w = ui.available_width().max(180.0);
+    ui.horizontal(|ui| {
+        ui.small(RichText::new(title).strong().color(Color32::from_rgb(203, 213, 225)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.small(RichText::new(current_text).strong().color(color));
+        });
+    });
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, 56.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 28));
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(71, 85, 105, 140)),
+        egui::StrokeKind::Outside,
+    );
+
+    let plot = egui::Rect::from_min_max(
+        egui::Pos2::new(rect.min.x + 36.0, rect.min.y + 5.0),
+        egui::Pos2::new(rect.max.x - 6.0, rect.max.y - 5.0),
+    );
+    painter.line_segment(
+        [
+            egui::Pos2::new(plot.min.x, plot.min.y),
+            egui::Pos2::new(plot.min.x, plot.max.y),
+        ],
+        egui::Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(71, 85, 105, 110)),
+    );
+    painter.line_segment(
+        [
+            egui::Pos2::new(plot.min.x, plot.center().y),
+            egui::Pos2::new(plot.max.x, plot.center().y),
+        ],
+        egui::Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(71, 85, 105, 80)),
+    );
+
+    if data.is_empty() {
+        painter.text(
+            plot.center(),
+            egui::Align2::CENTER_CENTER,
+            "Collecting telemetry...",
+            egui::FontId::monospace(10.0),
+            Color32::from_rgb(148, 163, 184),
+        );
+        return;
+    }
+
+    let mut min_v = data.iter().copied().fold(f32::INFINITY, f32::min);
+    let mut max_v = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if let Some(p) = pre_lesion {
+        min_v = min_v.min(p);
+        max_v = max_v.max(p);
+    }
+    if let Some(a) = acute_lesion {
+        min_v = min_v.min(a);
+        max_v = max_v.max(a);
+    }
+    if is_percent {
+        min_v = min_v.min(0.0);
+        max_v = (max_v * 1.05).max(min_v + 10.0).min(100.0);
+    } else if (max_v - min_v).abs() < 0.05 {
+        min_v = (min_v - 0.05).max(0.0);
+        max_v = min_v + 0.1;
+    }
+    let span = (max_v - min_v).max(1e-4);
+
+    let y_of = |v: f32| -> f32 {
+        let norm = ((v - min_v) / span).clamp(0.0, 1.0);
+        plot.max.y - norm * plot.height()
+    };
+
+    // Optional Pre / Acute lesion reference lines
+    if let Some(pre) = pre_lesion {
+        let y = y_of(pre);
+        painter.line_segment(
+            [egui::Pos2::new(plot.min.x, y), egui::Pos2::new(plot.max.x, y)],
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 160)),
+        );
+    }
+    if let Some(acute) = acute_lesion {
+        let y = y_of(acute);
+        painter.line_segment(
+            [egui::Pos2::new(plot.min.x, y), egui::Pos2::new(plot.max.x, y)],
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 160)),
+        );
+    }
+
+    let n = data.len();
+    let x_of = |i: usize| -> f32 {
+        if n <= 1 {
+            plot.center().x
+        } else {
+            plot.min.x + (i as f32 / (n - 1) as f32) * plot.width()
+        }
+    };
+
+    for (ev_idx, _tag) in lesion_events {
+        if *ev_idx < n {
+            let ex = x_of(*ev_idx);
+            painter.line_segment(
+                [egui::Pos2::new(ex, plot.min.y), egui::Pos2::new(ex, plot.max.y)],
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 175)),
+            );
+        }
+    }
+
+    let pts: Vec<egui::Pos2> = data
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| egui::Pos2::new(x_of(i), y_of(v)))
+        .collect();
+    if pts.len() >= 2 {
+        painter.add(egui::Shape::line(pts.clone(), egui::Stroke::new(1.8_f32, color)));
+    }
+    if let Some(&last_pt) = pts.last() {
+        painter.circle_filled(last_pt, 2.6, color);
+    }
+
+    let min_lbl = if is_percent {
+        format!("{min_v:.0}%")
+    } else {
+        format!("{min_v:.2}")
+    };
+    let max_lbl = if is_percent {
+        format!("{max_v:.0}%")
+    } else {
+        format!("{max_v:.2}")
+    };
+    painter.text(
+        egui::Pos2::new(rect.min.x + 32.0, plot.min.y),
+        egui::Align2::RIGHT_TOP,
+        max_lbl,
+        egui::FontId::monospace(9.0),
+        Color32::from_rgb(148, 163, 184),
+    );
+    painter.text(
+        egui::Pos2::new(rect.min.x + 32.0, plot.max.y),
+        egui::Align2::RIGHT_BOTTOM,
+        min_lbl,
+        egui::FontId::monospace(9.0),
+        Color32::from_rgb(148, 163, 184),
+    );
+}
+
+fn draw_lesion_recovery_bar(ui: &mut egui::Ui, pre: f32, acute: f32, now: f32) {
+    let avail_w = ui.available_width().max(160.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, 34.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, Color32::from_rgb(12, 19, 34));
+    let plot = rect.shrink2(egui::vec2(18.0, 6.0));
+    let min_v = pre.min(acute).min(now).min(0.0);
+    let max_v = pre.max(acute).max(now).max(min_v + 10.0).min(100.0);
+    let span = (max_v - min_v).max(1e-4);
+    let y_of = |v: f32| plot.max.y - ((v - min_v) / span).clamp(0.0, 1.0) * plot.height();
+    let pts = vec![
+        egui::Pos2::new(plot.min.x, y_of(pre)),
+        egui::Pos2::new(plot.center().x, y_of(acute)),
+        egui::Pos2::new(plot.max.x, y_of(now)),
+    ];
+    painter.add(egui::Shape::line(
+        pts.clone(),
+        egui::Stroke::new(1.6_f32, Color32::from_rgb(56, 189, 248)),
+    ));
+    painter.circle_filled(pts[0], 3.0, Color32::from_rgb(56, 189, 248));
+    painter.circle_filled(pts[1], 3.0, Color32::from_rgb(244, 63, 94));
+    painter.circle_filled(pts[2], 3.0, Color32::from_rgb(52, 211, 153));
 }
 
 impl eframe::App for NeuroSpaceApp {
@@ -715,7 +1102,7 @@ pub fn render_headless_screenshot(
             app.status_banner = "Preset 1 — Tier V M13 6-Layered Cerebral Cortex Grey Matter (L1–L6)".to_string();
         }
     }
-    for _ in 0..35 {
+    for _ in 0..60 {
         app.sim.step_simulation();
     }
 
