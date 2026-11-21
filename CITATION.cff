@@ -32,10 +32,10 @@ preferred-citation:
   journal: "CRV Science Apps Preprints"
   doi: "10.5281/zenodo.24263468"
   url: "https://crvscience.com/apps/preprints/neurospace-lab-3d-neural-cortex"
-  notes: "Preprint ID: APP-PREPRINT-19 (Zenodo Concept DOI reserved)"
+  notes: "Preprint ID: APP-PREPRINT-19"
 references:
   - type: article
-    title: "The CRV Science App Network: Seventeen Open-Source Rust Programs for Science, Data, and Simulation"
+    title: "The CRV Science App Network: Twenty Open-Source Rust Programs for Science, Data, and Simulation"
     authors:
       - family-names: "White"
         given-names: "Bryan P."

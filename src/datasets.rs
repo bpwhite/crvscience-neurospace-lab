@@ -82,6 +82,21 @@ impl DatasetId {
         }
     }
 
+    pub fn from_code(code: &str) -> Result<Self, String> {
+        let trimmed = code.trim();
+        Self::ALL
+            .into_iter()
+            .find(|d| d.code().eq_ignore_ascii_case(trimmed))
+            .ok_or_else(|| {
+                let valid = Self::ALL
+                    .into_iter()
+                    .map(Self::code)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Unknown dataset code '{code}'. Valid codes (D1..D7): {valid}.")
+            })
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Self::D1ImageClassification => "Image Classification (CipherGlyph 8x8)",

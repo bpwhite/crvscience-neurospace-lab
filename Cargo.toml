@@ -10,7 +10,6 @@ readme = "README.md"
 [dependencies]
 eframe = { version = "0.31", default-features = true, features = ["wgpu"] }
 egui = "0.31"
-egui_extras = "0.31"
 glam = { version = "0.29", features = ["serde"] }
 png = "0.18"
 rusqlite = { version = "0.32", features = ["bundled"] }

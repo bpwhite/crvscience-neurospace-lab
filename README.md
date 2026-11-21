@@ -2,6 +2,9 @@
 
 Native safe-Rust (`#![forbid(unsafe_code)]`) 3D Neural Network Topology, Structural Plasticity & Cerebral Cortex Grey-Matter Workstation built with `eframe`/`egui` `0.31`, `glam` `0.29`, bundled `rusqlite` `0.32` (WAL), and `clap` `4.5`, paired with a synchronized Three.js `r128` 3D browser observatory (`web/neurospace_lab_preview.html`).
 
+- **Website**: [CRV Science Network](https://crvscience.com) · [CRV Science Public Apps](https://crvscience.com/apps)
+- **License**: GNU General Public License v3.0 or later (`GPL-3.0-or-later`, see [LICENSE](LICENSE))
+
 ## What's New in v1.6.0
 
 - **Calm, Sparse Macroscopic Flow Sampling**: Replaces dense per-synapse dart barrages with gentle, sine-faded flow wisps sampled across a configurable fraction of representative pathways (`~10%` default, capped at `<= 16–22` staggered waves with refractory rest intervals) so directional signal flow is clear without overwhelming stationary neurons.

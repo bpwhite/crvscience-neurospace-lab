@@ -17,6 +17,7 @@
 
 use neurospace_lab::datasets::DatasetId;
 use neurospace_lab::engine::{NeuralSpaceSim, NeuronRole, OptoClamp};
+use neurospace_lab::gui::NeuroSpaceApp;
 use neurospace_lab::icon::app_egui_icon;
 use neurospace_lab::models::{ModelArch, OutputGoal, RenderMode};
 use neurospace_lab::persistence::{LabStore, WorksetEnvelope};
@@ -562,4 +563,108 @@ fn workset_load_from_file_surfaces_missing_corrupt_and_tampered_errors() {
     let err = WorksetEnvelope::load_from_file(&tampered).expect_err("must reject bad sha256");
     assert!(err.contains("SHA-256"));
     let _ = std::fs::remove_file(&tampered);
+}
+
+#[test]
+fn dataset_and_model_from_code_reject_invalid_and_accept_valid() {
+    assert_eq!(DatasetId::from_code("D1"), Ok(DatasetId::D1ImageClassification));
+    assert_eq!(DatasetId::from_code("d4"), Ok(DatasetId::D4PlantSpecies));
+    let d_err = DatasetId::from_code("D99").expect_err("D99 must be rejected");
+    assert!(d_err.contains("D99") && d_err.contains("D1..D7"), "err={d_err}");
+
+    assert_eq!(ModelArch::from_code("M0"), Ok(ModelArch::M0MinimalPerceptron));
+    assert_eq!(
+        ModelArch::from_code("m13"),
+        Ok(ModelArch::M13CerebralCortexGreyMatter)
+    );
+    let m_err = ModelArch::from_code("M99").expect_err("M99 must be rejected");
+    assert!(m_err.contains("M99") && m_err.contains("M0..M14"), "err={m_err}");
+}
+
+#[test]
+fn headless_gui_shortcuts_f1_escape_and_focus_guarded_space() {
+    let ctx = egui::Context::default();
+    let mut app = NeuroSpaceApp::new_headless();
+    assert!(app.running);
+    assert!(!app.show_about_modal);
+
+    let run_frame = |app: &mut NeuroSpaceApp, key: Option<egui::Key>, focus_text: bool| {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        if let Some(k) = key {
+            raw.events.push(egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        let mut dummy_buf = String::new();
+        let _ = ctx.run(raw, |ctx| {
+            if focus_text {
+                egui::Window::new("test_focus_holder").show(ctx, |ui| {
+                    let resp = ui.text_edit_singleline(&mut dummy_buf);
+                    resp.request_focus();
+                });
+            }
+            app.ui_step(ctx);
+        });
+    };
+
+    // Warmup frame without focus
+    run_frame(&mut app, None, false);
+
+    // Space toggles running when unfocused
+    run_frame(&mut app, Some(egui::Key::Space), false);
+    assert!(!app.running, "Space should pause when unfocused");
+    run_frame(&mut app, Some(egui::Key::Space), false);
+    assert!(app.running, "Space should resume when unfocused");
+
+    // Establish focused text input on a warmup frame, then verify Space is ignored
+    run_frame(&mut app, None, true);
+    assert!(ctx.wants_keyboard_input());
+    run_frame(&mut app, Some(egui::Key::Space), true);
+    assert!(
+        app.running,
+        "Space must not toggle running when a text widget holds keyboard focus"
+    );
+
+    // Clear focus by rendering without the focus window and surrendering focus
+    ctx.memory_mut(|m| {
+        if let Some(fid) = m.focused() {
+            m.surrender_focus(fid);
+        }
+    });
+    run_frame(&mut app, None, false);
+
+    // F1 opens About modal; Escape closes About modal first, then clears selected_neuron
+    app.selected_neuron = Some(0);
+    run_frame(&mut app, Some(egui::Key::F1), false);
+    assert!(app.show_about_modal, "F1 should open About modal");
+
+    run_frame(&mut app, Some(egui::Key::Escape), false);
+    assert!(!app.show_about_modal, "First Escape closes About modal");
+    assert_eq!(
+        app.selected_neuron,
+        Some(0),
+        "First Escape leaves selected_neuron intact"
+    );
+
+    run_frame(&mut app, Some(egui::Key::Escape), false);
+    assert_eq!(
+        app.selected_neuron, None,
+        "Second Escape clears selected_neuron"
+    );
+
+    // F1 toggles About open and closed again
+    run_frame(&mut app, Some(egui::Key::F1), false);
+    assert!(app.show_about_modal);
+    run_frame(&mut app, Some(egui::Key::F1), false);
+    assert!(!app.show_about_modal);
 }

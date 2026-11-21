@@ -98,6 +98,21 @@ impl ModelArch {
         }
     }
 
+    pub fn from_code(code: &str) -> Result<Self, String> {
+        let trimmed = code.trim();
+        Self::ALL
+            .into_iter()
+            .find(|m| m.code().eq_ignore_ascii_case(trimmed))
+            .ok_or_else(|| {
+                let valid = Self::ALL
+                    .into_iter()
+                    .map(Self::code)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Unknown model code '{code}'. Valid codes (M0..M14): {valid}.")
+            })
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::M0MinimalPerceptron => "Minimal Single-Layer Perceptron (Direct Gate)",

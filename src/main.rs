@@ -69,20 +69,6 @@ enum Commands {
     ExportSampleWorkset,
 }
 
-fn parse_dataset(code: &str) -> DatasetId {
-    DatasetId::ALL
-        .into_iter()
-        .find(|d| d.code().eq_ignore_ascii_case(code))
-        .unwrap_or(DatasetId::D4PlantSpecies)
-}
-
-fn parse_model(code: &str) -> ModelArch {
-    ModelArch::ALL
-        .into_iter()
-        .find(|m| m.code().eq_ignore_ascii_case(code))
-        .unwrap_or(ModelArch::M13CerebralCortexGreyMatter)
-}
-
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn attach_parent_console_if_cli() {
@@ -127,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         Commands::BenchDataset { dataset, steps } => {
-            let ds = parse_dataset(&dataset);
+            let ds = DatasetId::from_code(&dataset)?;
             let mut sim = NeuralSpaceSim::new(ModelArch::M1PerceptronMlp, ds, 2026);
             sim.dataset_locked = true;
             sim.run_locked_sweep(steps);
@@ -153,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::BenchModel { model, steps } => {
-            let arch = parse_model(&model);
+            let arch = ModelArch::from_code(&model)?;
             let mut sim = NeuralSpaceSim::new(arch, DatasetId::D1ImageClassification, 2026);
             sim.model_locked = true;
             sim.run_locked_sweep(steps);

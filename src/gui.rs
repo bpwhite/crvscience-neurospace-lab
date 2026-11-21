@@ -46,7 +46,8 @@ pub struct NeuroSpaceApp {
 }
 
 impl NeuroSpaceApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let (store, err_msg) = match LabStore::open("neurospace_lab.sqlite") {
             Ok(st) => (Some(st), None),
             Err(e) => (
@@ -199,16 +200,32 @@ impl NeuroSpaceApp {
 
 impl NeuroSpaceApp {
     pub fn ui_step(&mut self, ctx: &egui::Context) {
-        ctx.set_visuals(egui::Visuals::dark());
-
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.running = !self.running;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.show_about_modal {
+                self.show_about_modal = false;
+            } else if self.selected_neuron.is_some() {
+                self.selected_neuron = None;
+            }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
-            self.quick_save();
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.show_about_modal = !self.show_about_modal;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
-            self.quick_load();
+        if ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::O)) {
+            self.import_workset_dialog();
+        }
+        if ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::S)) {
+            self.export_workset_dialog();
+        }
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                self.running = !self.running;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+                self.quick_save();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+                self.quick_load();
+            }
         }
 
         if self.running {
@@ -437,23 +454,38 @@ impl NeuroSpaceApp {
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.learning_rate, 0.002..=0.15)
                                 .text("Learning Rate η"),
+                        )
+                        .on_hover_text(
+                            "Step size η controlling synaptic weight update magnitude per simulation tick.",
                         );
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.momentum, 0.0..=0.96)
                                 .text("Momentum β"),
+                        )
+                        .on_hover_text(
+                            "Exponential velocity damping β smoothing gradient descent trajectories.",
                         );
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.prune_threshold, 0.0..=0.22)
                                 .text("Synaptic Prune |w|"),
+                        )
+                        .on_hover_text(
+                            "Structural pruning threshold: synapses with |w| below this value are eliminated.",
                         );
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.plasticity_growth, 0.0..=1.0)
                                 .text("Neurogenesis / Sprout"),
+                        )
+                        .on_hover_text(
+                            "Rate of activity-dependent synaptogenesis and compensatory new-soma sprouting.",
                         );
                         let prev_flow = self.sim.params.flow_sample_rate;
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.flow_sample_rate, 0.0..=1.0)
                                 .text("River Stream Intensity"),
+                        )
+                        .on_hover_text(
+                            "Fraction of active pathways carrying calm macroscopic signal stream wisps.",
                         );
                         if (self.sim.params.flow_sample_rate - prev_flow).abs() > 0.01 {
                             self.sim.refresh_flow_sample();
@@ -462,6 +494,9 @@ impl NeuroSpaceApp {
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.hidden_scale, 0.5..=2.0)
                                 .text("Cortical Capacity"),
+                        )
+                        .on_hover_text(
+                            "Scales hidden/cortical layer soma count and rebuilds network topology.",
                         );
                         if (self.sim.params.hidden_scale - prev_scale).abs() > 0.04 {
                             self.selected_neuron = None;
@@ -470,6 +505,9 @@ impl NeuroSpaceApp {
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.adversarial_eps, 0.0..=0.45)
                                 .text("Adversarial ε"),
+                        )
+                        .on_hover_text(
+                            "Perturbation radius ε used to probe adversarial margin and input robustness.",
                         );
                     });
 
@@ -511,31 +549,52 @@ impl NeuroSpaceApp {
                     ui.group(|ui| {
                         ui.strong("6. Causal Lesion & Optogenetics Lab");
                         ui.horizontal_wrapped(|ui| {
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::Inspect, "🔍 Inspect");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::AblateLesion, "✂ Ablate");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "[+] ChR2 (+)");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "[-] NpHR (-)");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::Inspect, "🔍 Inspect")
+                                .on_hover_text("Inspect soma coordinates, membrane potential, activation, and gradient in 3D.");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::AblateLesion, "✂ Ablate")
+                                .on_hover_text("Click a 3D soma to toggle focal lesion ablation (silences outgoing signals).");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "[+] ChR2 (+)")
+                                .on_hover_text("Channelrhodopsin-2 photostimulation: click a 3D soma to clamp-excite it.");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "[-] NpHR (-)")
+                                .on_hover_text("Halorhodopsin photoinhibition: click a 3D soma to optogenetically silence it.");
                         });
                         ui.add(
                             egui::Slider::new(&mut self.sim.opto_clamp_drive, 0.2..=1.8)
                                 .text("ChR2 Laser Drive"),
-                        );
+                        )
+                        .on_hover_text("Optical depolarization drive applied to ChR2-clamped neurons.");
                         ui.horizontal_wrapped(|ui| {
-                            if ui.button("✂ Sever Feedback").clicked() {
+                            if ui
+                                .button("✂ Sever Feedback")
+                                .on_hover_text("Sever reverse top-down feedback tracts to observe predictive-coding disruption.")
+                                .clicked()
+                            {
                                 let n = self.sim.sever_feedback_tracts();
                                 self.status_banner = format!("Severed {} reverse feedback tracts.", n);
                             }
-                            if ui.button("✂ Sever Skip/Lat").clicked() {
+                            if ui
+                                .button("✂ Sever Skip/Lat")
+                                .on_hover_text("Sever lateral and skip-connection axons across cortical/columnar zones.")
+                                .clicked()
+                            {
                                 let n = self.sim.sever_lateral_skip_tracts();
                                 self.status_banner = format!("Severed {} lateral/skip axons.", n);
                             }
                         });
                         ui.horizontal_wrapped(|ui| {
-                            if ui.button("⚡ Focal Stroke (25%)").clicked() {
+                            if ui
+                                .button("⚡ Focal Stroke (25%)")
+                                .on_hover_text("Ablate 25% of somata in a localized cluster to observe acute drop and plastic recovery.")
+                                .clicked()
+                            {
                                 let n = self.sim.induce_focal_stroke();
                                 self.status_banner = format!("Focal lesion ablated {} somata.", n);
                             }
-                            if ui.button("♻ Heal All").clicked() {
+                            if ui
+                                .button("♻ Heal All")
+                                .on_hover_text("Restore all ablated somata, severed tracts, and optogenetic clamps.")
+                                .clicked()
+                            {
                                 self.sim.heal_all_interventions();
                                 self.status_banner = "Healed all lesions, tracts & clamps.".to_string();
                             }
@@ -563,6 +622,7 @@ impl NeuroSpaceApp {
                     if ui.small_button("About").clicked() {
                         self.show_about_modal = true;
                     }
+                    ui.hyperlink_to("crvscience.com", "https://crvscience.com");
                     ui.small("Copyright CRV Science Network | GPL-3.0-or-later");
                 });
             });
@@ -800,7 +860,7 @@ fn draw_sparkline(
         });
     });
 
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, 56.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail_w, 56.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 28));
     painter.rect_stroke(
@@ -935,6 +995,29 @@ fn draw_sparkline(
         egui::FontId::monospace(9.0),
         Color32::from_rgb(148, 163, 184),
     );
+
+    if let Some(hover_pos) = resp.hover_pos() {
+        let idx = if n <= 1 || plot.width() <= 1.0 {
+            0
+        } else {
+            let t = ((hover_pos.x - plot.min.x) / plot.width()).clamp(0.0, 1.0);
+            (t * (n - 1) as f32).round() as usize
+        }
+        .min(n - 1);
+        let hx = x_of(idx);
+        let hy = y_of(data[idx]);
+        painter.line_segment(
+            [egui::Pos2::new(hx, plot.min.y), egui::Pos2::new(hx, plot.max.y)],
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(226, 232, 240, 140)),
+        );
+        painter.circle_filled(egui::Pos2::new(hx, hy), 3.2, Color32::WHITE);
+        let val_str = if is_percent {
+            format!("{:.1}%", data[idx])
+        } else {
+            format!("{:.4}", data[idx])
+        };
+        resp.on_hover_text(format!("{title}\nSample #{}: {val_str}", idx + 1));
+    }
 }
 
 fn draw_lesion_recovery_bar(ui: &mut egui::Ui, pre: f32, acute: f32, now: f32) {
@@ -1060,6 +1143,7 @@ pub fn render_headless_screenshot(
     let mut renderer = Renderer::new(&device, format, None, 1, false);
     let egui_ctx = egui::Context::default();
     egui_ctx.set_pixels_per_point(1.0);
+    egui_ctx.set_visuals(egui::Visuals::dark());
 
     let mut app = NeuroSpaceApp::new_headless();
     app.running = false;
