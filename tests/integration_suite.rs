@@ -16,12 +16,14 @@
 #![forbid(unsafe_code)]
 
 use neurospace_lab::datasets::DatasetId;
-use neurospace_lab::engine::{NeuralSpaceSim, NeuronRole, OptoClamp};
-use neurospace_lab::gui::NeuroSpaceApp;
+use neurospace_lab::engine::{
+    stdp_trace_delta, NeuralSpaceSim, NeuronRole, OptoClamp, M7_LIF_DT_PASS,
+};
+use neurospace_lab::gui::{NeuroSpaceApp, ProbeTool};
 use neurospace_lab::icon::app_egui_icon;
 use neurospace_lab::models::{ModelArch, OutputGoal, RenderMode};
 use neurospace_lab::persistence::{LabStore, WorksetEnvelope};
-use neurospace_lab::renderer_3d::classify_neuron_zone;
+use neurospace_lab::renderer_3d::{classify_neuron_zone, cubic_bezier_3d, OrbitCamera3D};
 
 #[test]
 fn all_fifteen_models_including_cortex_grey_matter_step_cleanly() {
@@ -667,4 +669,379 @@ fn headless_gui_shortcuts_f1_escape_and_focus_guarded_space() {
     assert!(app.show_about_modal);
     run_frame(&mut app, Some(egui::Key::F1), false);
     assert!(!app.show_about_modal);
+}
+
+#[test]
+fn adversarial_margin_decreases_monotonically_with_epsilon() {
+    for arch in [
+        ModelArch::M1PerceptronMlp,
+        ModelArch::M13CerebralCortexGreyMatter,
+    ] {
+        let mut sim = NeuralSpaceSim::new(arch, DatasetId::D4PlantSpecies, 2026);
+        for _ in 0..60 {
+            sim.step_simulation();
+        }
+        let epsilons = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40];
+        let mut margins = Vec::with_capacity(epsilons.len());
+        let mut clean_scores = Vec::with_capacity(epsilons.len());
+        for &eps in &epsilons {
+            sim.params.adversarial_eps = eps;
+            sim.evaluate_validation_core();
+            assert!(
+                sim.adversarial_margin.is_finite()
+                    && (0.0..=100.0).contains(&sim.adversarial_margin)
+            );
+            margins.push(sim.adversarial_margin);
+            clean_scores.push(sim.primary_metric);
+        }
+        for w in clean_scores.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() < 1e-4,
+                "clean primary_metric must stay invariant across epsilons"
+            );
+        }
+        for (i, w) in margins.windows(2).enumerate() {
+            assert!(
+                w[1] <= w[0] + 1e-4,
+                "{:?} margin increased from eps={} ({:.3}) to eps={} ({:.3})",
+                arch,
+                epsilons[i],
+                w[0],
+                epsilons[i + 1],
+                w[1]
+            );
+        }
+        assert!(
+            margins[0] > margins[margins.len() - 1] + 1.0,
+            "{:?} margin should drop substantially from eps=0 ({:.2}) to eps=0.40 ({:.2})",
+            arch,
+            margins[0],
+            margins[margins.len() - 1]
+        );
+    }
+}
+
+#[test]
+fn m7_spiking_lif_exponential_decay_and_asymmetric_stdp() {
+    // 1. Verify exact exp(-dt / n.tau) subthreshold membrane leak across distinct tau constants
+    let mut sim = NeuralSpaceSim::new(
+        ModelArch::M7SpikingLifStdp,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    let exc_indices: Vec<usize> = sim
+        .neurons
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.role == NeuronRole::ExcitatoryHidden)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(exc_indices.len() >= 2);
+    let fast_idx = exc_indices[0];
+    let slow_idx = exc_indices[1];
+
+    for syn in &mut sim.synapses {
+        syn.severed = true;
+    }
+    sim.neurons[fast_idx].tau = 0.45;
+    sim.neurons[slow_idx].tau = 1.00;
+    sim.neurons[fast_idx].bias = 0.0;
+    sim.neurons[slow_idx].bias = 0.0;
+    sim.neurons[fast_idx].membrane_v = 0.45;
+    sim.neurons[slow_idx].membrane_v = 0.45;
+
+    let zeros = vec![0.0; sim.dataset_id.input_dim()];
+    let _ = sim.forward_sample(&zeros, false);
+
+    // M7 runs `forward_passes()` passes per forward_sample
+    let total_dt = (sim.forward_passes() as f32) * M7_LIF_DT_PASS;
+    let expected_fast = 0.45 * (-total_dt / 0.45).exp();
+    let expected_slow = 0.45 * (-total_dt / 1.00).exp();
+    assert!(
+        (sim.neurons[fast_idx].membrane_v - expected_fast).abs() < 1e-5,
+        "got {}, expected {}",
+        sim.neurons[fast_idx].membrane_v,
+        expected_fast
+    );
+    assert!(
+        (sim.neurons[slow_idx].membrane_v - expected_slow).abs() < 1e-5,
+        "got {}, expected {}",
+        sim.neurons[slow_idx].membrane_v,
+        expected_slow
+    );
+    assert!(sim.neurons[slow_idx].membrane_v > sim.neurons[fast_idx].membrane_v);
+
+    // 2. Verify asymmetric trace-based STDP helper & live step_simulation potentiation/depression
+    assert!(stdp_trace_delta(0.75, true, 0.0, false) > 0.0);
+    assert!(stdp_trace_delta(0.0, false, 0.75, true) < 0.0);
+
+    let mut stdp_sim = NeuralSpaceSim::new(
+        ModelArch::M7SpikingLifStdp,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    stdp_sim.params.learning_rate = 0.05;
+    stdp_sim.params.momentum = 0.0;
+    stdp_sim.params.batch_size = 4;
+    stdp_sim.opto_clamp_drive = 1.1;
+
+    // Locate an excitatory synapse (non-inhibitory pre -> hidden post)
+    let target_syn_idx = stdp_sim
+        .synapses
+        .iter()
+        .position(|s| {
+            stdp_sim.neurons[s.from].role == NeuronRole::ExcitatoryHidden
+                && stdp_sim.neurons[s.to].role == NeuronRole::ExcitatoryHidden
+        })
+        .expect("excitatory hidden->hidden synapse");
+    let pre_idx = stdp_sim.synapses[target_syn_idx].from;
+    let post_idx = stdp_sim.synapses[target_syn_idx].to;
+
+    // Isolate target synapse so post_grad == 0 and no unrelated drive triggers spurious spikes
+    for (i, syn) in stdp_sim.synapses.iter_mut().enumerate() {
+        syn.severed = i != target_syn_idx;
+        syn.velocity = 0.0;
+    }
+    stdp_sim.synapses[target_syn_idx].weight = 0.25;
+    stdp_sim.neurons[pre_idx].bias = 0.0;
+    stdp_sim.neurons[post_idx].bias = 0.0;
+
+    // (a) Pre-before-post: Tick 1 pre fires (post silenced), Tick 2 post fires (pre silent)
+    stdp_sim.neurons[pre_idx].opto_clamp = OptoClamp::ChR2Excite;
+    stdp_sim.neurons[post_idx].opto_clamp = OptoClamp::NpHRSilence;
+    stdp_sim.step_simulation();
+
+    let w_before_ltp = stdp_sim.synapses[target_syn_idx].weight;
+    stdp_sim.neurons[pre_idx].opto_clamp = OptoClamp::None;
+    stdp_sim.neurons[post_idx].opto_clamp = OptoClamp::ChR2Excite;
+    stdp_sim.synapses[target_syn_idx].velocity = 0.0;
+    stdp_sim.step_simulation();
+    let w_after_ltp = stdp_sim.synapses[target_syn_idx].weight;
+    assert!(
+        w_after_ltp > w_before_ltp,
+        "pre-before-post must potentiate (dw > 0): before={w_before_ltp}, after={w_after_ltp}"
+    );
+
+    // (b) Post-before-pre: Reset traces/velocities, Tick 1 post fires (pre silenced), Tick 2 pre fires (post silent)
+    stdp_sim.clear_all_clamps();
+    for n in &mut stdp_sim.neurons {
+        n.spike_trace = 0.0;
+        n.membrane_v = 0.0;
+    }
+    stdp_sim.synapses[target_syn_idx].weight = 0.25;
+    stdp_sim.synapses[target_syn_idx].velocity = 0.0;
+
+    stdp_sim.neurons[post_idx].opto_clamp = OptoClamp::ChR2Excite;
+    stdp_sim.neurons[pre_idx].opto_clamp = OptoClamp::NpHRSilence;
+    stdp_sim.step_simulation();
+
+    let w_before_ltd = stdp_sim.synapses[target_syn_idx].weight;
+    stdp_sim.neurons[post_idx].opto_clamp = OptoClamp::None;
+    stdp_sim.neurons[pre_idx].opto_clamp = OptoClamp::ChR2Excite;
+    stdp_sim.synapses[target_syn_idx].velocity = 0.0;
+    stdp_sim.step_simulation();
+    let w_after_ltd = stdp_sim.synapses[target_syn_idx].weight;
+    assert!(
+        w_after_ltd < w_before_ltd,
+        "post-before-pre must depress (dw < 0): before={w_before_ltd}, after={w_after_ltd}"
+    );
+}
+
+#[test]
+fn m13_cortex_apical_feedback_separation_and_output_goals() {
+    let mut sim = NeuralSpaceSim::new(
+        ModelArch::M13CerebralCortexGreyMatter,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    for _ in 0..25 {
+        sim.step_simulation();
+    }
+    let feats = sim.active_sample.features.clone();
+    let _ = sim.forward_sample(&feats, false);
+    let mean_ca_intact: f32 = sim
+        .neurons
+        .iter()
+        .filter(|n| n.role.is_pyramidal())
+        .map(|n| n.apical_ca_burst)
+        .sum::<f32>();
+    assert!(mean_ca_intact > 0.01, "intact L1 feedback should drive pyramidal Ca2+");
+
+    let severed = sim.sever_feedback_tracts();
+    assert!(severed > 0);
+    for _ in 0..5 {
+        let _ = sim.forward_sample(&feats, false);
+    }
+    let mean_ca_severed: f32 = sim
+        .neurons
+        .iter()
+        .filter(|n| n.role.is_pyramidal())
+        .map(|n| n.apical_ca_burst)
+        .sum::<f32>();
+    assert!(
+        mean_ca_severed < mean_ca_intact * 0.5,
+        "severing is_feedback tracts must drop apical_ca_burst ({mean_ca_severed} vs {mean_ca_intact})"
+    );
+
+    for goal in [
+        OutputGoal::AdversarialImmunity,
+        OutputGoal::FreeEnergyCalibration,
+    ] {
+        let mut gsim = NeuralSpaceSim::new(
+            ModelArch::M1PerceptronMlp,
+            DatasetId::D4PlantSpecies,
+            2026,
+        );
+        gsim.goal = goal;
+        for _ in 0..20 {
+            gsim.step_simulation();
+        }
+        assert!(gsim.current_loss.is_finite());
+        assert!(gsim.adversarial_margin.is_finite());
+        if goal == OutputGoal::FreeEnergyCalibration {
+            assert!(gsim.pc_mean_free_energy > 0.0 && gsim.pc_mean_free_energy.is_finite());
+        }
+    }
+}
+
+#[test]
+fn incremental_locked_sweep_completes_and_cancels_cleanly() {
+    let mut sim = NeuralSpaceSim::new(
+        ModelArch::M1PerceptronMlp,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    sim.dataset_locked = true;
+    sim.start_locked_sweep(6);
+    assert!(sim.active_sweep.is_some());
+
+    let mut prev_frac = 0.0f32;
+    let mut ticks = 0usize;
+    while let Some(prog) = sim.sweep_progress() {
+        assert!(prog.fraction() >= prev_frac - 1e-5);
+        prev_frac = prog.fraction();
+        if !sim.advance_locked_sweep(12) {
+            break;
+        }
+        ticks += 1;
+        assert!(ticks < 200);
+    }
+    assert!(sim.active_sweep.is_none());
+    assert_eq!(sim.model, ModelArch::M1PerceptronMlp);
+    assert_eq!(sim.comparison_ledger.len(), 15);
+
+    // Cancellation mid-sweep restores original model & dataset
+    sim.start_locked_sweep(10);
+    let _ = sim.advance_locked_sweep(25);
+    assert!(sim.active_sweep.is_some());
+    sim.cancel_locked_sweep();
+    assert!(sim.active_sweep.is_none());
+    assert_eq!(sim.model, ModelArch::M1PerceptronMlp);
+    assert_eq!(sim.dataset_id, DatasetId::D4PlantSpecies);
+}
+
+#[test]
+fn headless_gui_camera_probe_hotkeys_and_3d_clipping_and_bezier() {
+    let ctx = egui::Context::default();
+    let mut app = NeuroSpaceApp::new_headless();
+    app.running = false;
+
+    let run_key = |app: &mut NeuroSpaceApp, key: Option<egui::Key>, mods: egui::Modifiers, focus: bool| {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        if let Some(k) = key {
+            raw.events.push(egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            });
+        }
+        let mut dummy = String::new();
+        let _ = ctx.run(raw, |ctx| {
+            if focus {
+                egui::Window::new("focus_guard").show(ctx, |ui| {
+                    ui.text_edit_singleline(&mut dummy).request_focus();
+                });
+            }
+            app.ui_step(ctx);
+        });
+    };
+
+    // Unfocused probe tool & single-step hotkeys
+    run_key(&mut app, Some(egui::Key::X), egui::Modifiers::NONE, false);
+    assert_eq!(app.probe_tool, ProbeTool::AblateLesion);
+    run_key(&mut app, Some(egui::Key::E), egui::Modifiers::NONE, false);
+    assert_eq!(app.probe_tool, ProbeTool::ChR2Excite);
+    run_key(&mut app, Some(egui::Key::S), egui::Modifiers::NONE, false);
+    assert_eq!(app.probe_tool, ProbeTool::NpHRSilence);
+    run_key(&mut app, Some(egui::Key::I), egui::Modifiers::NONE, false);
+    assert_eq!(app.probe_tool, ProbeTool::Inspect);
+
+    let s0 = app.sim.step_count;
+    run_key(&mut app, Some(egui::Key::N), egui::Modifiers::NONE, false);
+    assert_eq!(app.sim.step_count, s0 + 1);
+    run_key(&mut app, Some(egui::Key::Period), egui::Modifiers::NONE, false);
+    assert_eq!(app.sim.step_count, s0 + 2);
+
+    // Camera presets 1-4, A, R
+    run_key(&mut app, Some(egui::Key::Num2), egui::Modifiers::NONE, false);
+    assert!(app.camera.preset_goal.is_some());
+    assert!(!app.camera.auto_orbit);
+    for _ in 0..40 {
+        app.camera.damp_step(0.016);
+    }
+    assert!(app.camera.yaw.abs() < 0.05 && app.camera.pitch.abs() < 0.05);
+
+    run_key(&mut app, Some(egui::Key::A), egui::Modifiers::NONE, false);
+    assert!(app.camera.auto_orbit);
+    run_key(&mut app, Some(egui::Key::R), egui::Modifiers::NONE, false);
+    assert!(app.camera.preset_goal.is_some());
+
+    // Guard check: focused text box blocks S / N / 4
+    run_key(&mut app, None, egui::Modifiers::NONE, true);
+    assert!(ctx.wants_keyboard_input());
+    run_key(&mut app, Some(egui::Key::S), egui::Modifiers::NONE, true);
+    assert_eq!(app.probe_tool, ProbeTool::Inspect);
+    let step_before = app.sim.step_count;
+    run_key(&mut app, Some(egui::Key::N), egui::Modifiers::NONE, true);
+    assert_eq!(app.sim.step_count, step_before);
+
+    // 3D cubic Bezier endpoints & near-plane segment clipping
+    let p0 = glam::Vec3::new(-4.0, 0.0, 0.0);
+    let p1 = glam::Vec3::new(-1.0, 3.0, 2.0);
+    let p2 = glam::Vec3::new(1.0, -2.0, -2.0);
+    let p3 = glam::Vec3::new(4.0, 1.0, 0.0);
+    assert!((cubic_bezier_3d(p0, p1, p2, p3, 0.0) - p0).length() < 1e-6);
+    assert!((cubic_bezier_3d(p0, p1, p2, p3, 1.0) - p3).length() < 1e-6);
+
+    let cam = OrbitCamera3D::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+    let vp = cam.view_proj(800.0 / 600.0);
+    let eye = cam.eye_position();
+    let behind_eye = eye + (eye - cam.target).normalize() * 3.0;
+    let in_front = glam::Vec3::ZERO;
+    assert!(
+        cam.project(&vp, rect, behind_eye).is_none(),
+        "point behind eye must cull"
+    );
+    assert!(
+        cam.project_segment(&vp, rect, behind_eye, in_front).is_some(),
+        "segment crossing near plane must clip cleanly instead of popping out"
+    );
+    let far_right = glam::Vec3::new(60.0, 0.0, 0.0);
+    assert!(
+        cam.project(&vp, rect, far_right).is_none(),
+        "far offscreen point outside ndc bounds"
+    );
+    assert!(
+        cam.project_segment(&vp, rect, in_front, far_right).is_some(),
+        "segment exiting viewport edge must clip cleanly without edge pop-out"
+    );
 }

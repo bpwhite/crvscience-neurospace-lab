@@ -217,24 +217,96 @@ impl NeuroSpaceApp {
             self.export_workset_dialog();
         }
         if !ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                self.running = !self.running;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
-                self.quick_save();
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
-                self.quick_load();
+            let no_mod = ctx.input(|i| !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt);
+            if no_mod {
+                if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                    self.running = !self.running;
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+                    self.quick_save();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+                    self.quick_load();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+                    self.camera.set_preset(-0.52, 0.24, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Isometric (1)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
+                    self.camera.set_preset(0.0, 0.0, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Sagittal X-Y (2)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num3)) {
+                    self.camera.set_preset(
+                        std::f32::consts::FRAC_PI_2,
+                        0.04,
+                        25.0,
+                        glam::Vec3::ZERO,
+                        false,
+                    );
+                    self.status_banner = "Camera preset: Coronal Y-Z (3)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) {
+                    self.camera.set_preset(0.0, 1.35, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Top-Down X-Z (4)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                    self.camera.reset();
+                    self.status_banner = "Camera reset to Isometric + Auto-Orbit (R)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::A)) {
+                    self.camera.auto_orbit = !self.camera.auto_orbit;
+                    self.status_banner = format!(
+                        "Camera auto-orbit {} (A)",
+                        if self.camera.auto_orbit { "enabled" } else { "paused" }
+                    );
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::N) || i.key_pressed(egui::Key::Period)) {
+                    self.running = false;
+                    self.sim.step_simulation();
+                    self.status_banner =
+                        format!("Single-stepped to tick {} (N / .)", self.sim.step_count);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+                    self.probe_tool = ProbeTool::Inspect;
+                    self.status_banner = "Probe tool: Inspect (I)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::X)) {
+                    self.probe_tool = ProbeTool::AblateLesion;
+                    self.status_banner = "Probe tool: Ablate / Lesion (X)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::E)) {
+                    self.probe_tool = ProbeTool::ChR2Excite;
+                    self.status_banner = "Probe tool: Optogenetic ChR2 Excite (E)".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::S)) {
+                    self.probe_tool = ProbeTool::NpHRSilence;
+                    self.status_banner = "Probe tool: Optogenetic NpHR Silence (S)".to_string();
+                }
             }
         }
 
-        if self.running {
+        let sweep_active = self.sim.active_sweep.is_some();
+        if sweep_active {
+            let still_running = self.sim.advance_locked_sweep(8);
+            if !still_running {
+                if let Some(msg) = self.sim.plasticity_log.first() {
+                    self.status_banner = msg.clone();
+                }
+            }
+            ctx.request_repaint();
+        } else if self.running {
             for _ in 0..self.steps_per_frame {
                 self.sim.step_simulation();
             }
             if self.camera.auto_orbit {
                 self.camera.yaw += 0.0038;
             }
+            ctx.request_repaint();
+        }
+
+        let dt = ctx.input(|i| i.predicted_dt);
+        if self.camera.damp_step(dt) {
             ctx.request_repaint();
         }
 
@@ -252,10 +324,20 @@ impl NeuroSpaceApp {
                 {
                     self.running = !self.running;
                 }
-                if ui.button("⏭ Step").clicked() {
+                if ui
+                    .add_enabled(self.sim.active_sweep.is_none(), egui::Button::new("⏭ Step"))
+                    .clicked()
+                {
+                    self.running = false;
                     self.sim.step_simulation();
                 }
-                if ui.button("↺ Rebuild Topology").clicked() {
+                if ui
+                    .add_enabled(
+                        self.sim.active_sweep.is_none(),
+                        egui::Button::new("↺ Rebuild Topology"),
+                    )
+                    .clicked()
+                {
                     self.selected_neuron = None;
                     self.hovered_neuron = None;
                     self.sim.rebuild_topology(false);
@@ -274,13 +356,28 @@ impl NeuroSpaceApp {
                         }
                     }
                 }
-                let sweep_label = if self.sim.dataset_locked && !self.sim.model_locked {
-                    "⚡ Sweep All 15 Models (Locked Dataset)"
+                if let Some(prog) = self.sim.sweep_progress() {
+                    ui.add(
+                        egui::ProgressBar::new(prog.fraction())
+                            .desired_width(210.0)
+                            .text(prog.description),
+                    );
+                    if ui.button("✖ Cancel").clicked() {
+                        self.sim.cancel_locked_sweep();
+                        self.status_banner = "Cancelled locked batch sweep.".to_string();
+                    }
                 } else {
-                    "⚡ Sweep All 7 Datasets (Locked Model)"
-                };
-                if ui.button(sweep_label).clicked() {
-                    self.sim.run_locked_sweep(35);
+                    let sweep_label = if self.sim.dataset_locked && !self.sim.model_locked {
+                        "⚡ Sweep All 15 Models (Locked Dataset)"
+                    } else {
+                        "⚡ Sweep All 7 Datasets (Locked Model)"
+                    };
+                    if ui.button(sweep_label).clicked() {
+                        self.selected_neuron = None;
+                        self.hovered_neuron = None;
+                        self.sim.start_locked_sweep(35);
+                        self.status_banner = "Running incremental non-blocking sweep...".to_string();
+                    }
                 }
 
                 ui.separator();
@@ -317,6 +414,14 @@ impl NeuroSpaceApp {
                     ))
                     .strong()
                     .color(Color32::from_rgb(52, 211, 153)),
+                );
+                ui.label("|");
+                ui.label(
+                    RichText::new(format!(
+                        "Adv Margin (ε={:.2}): {:.1}%",
+                        self.sim.params.adversarial_eps, self.sim.adversarial_margin
+                    ))
+                    .color(Color32::from_rgb(125, 211, 252)),
                 );
                 ui.label("|");
                 ui.label(
@@ -491,7 +596,8 @@ impl NeuroSpaceApp {
                             self.sim.refresh_flow_sample();
                         }
                         let prev_scale = self.sim.params.hidden_scale;
-                        ui.add(
+                        ui.add_enabled(
+                            self.sim.active_sweep.is_none(),
                             egui::Slider::new(&mut self.sim.params.hidden_scale, 0.5..=2.0)
                                 .text("Cortical Capacity"),
                         )
@@ -502,13 +608,17 @@ impl NeuroSpaceApp {
                             self.selected_neuron = None;
                             self.sim.rebuild_topology(false);
                         }
+                        let prev_eps = self.sim.params.adversarial_eps;
                         ui.add(
                             egui::Slider::new(&mut self.sim.params.adversarial_eps, 0.0..=0.45)
                                 .text("Adversarial ε"),
                         )
                         .on_hover_text(
-                            "Perturbation radius ε used to probe adversarial margin and input robustness.",
+                            "Perturbation radius ε used to probe FGSM/PGD adversarial margin and robust training.",
                         );
+                        if (self.sim.params.adversarial_eps - prev_eps).abs() > 0.004 {
+                            self.sim.evaluate_validation_core();
+                        }
                     });
 
                     ui.add_space(6.0);
@@ -540,7 +650,30 @@ impl NeuroSpaceApp {
                         };
                         ui.small(format!("Active Morphology: {}", mode_tag));
                         ui.checkbox(&mut self.show_group_highlights, "Highlight Layer / Lamina Zones");
-                        ui.checkbox(&mut self.camera.auto_orbit, "Auto-Orbit 3D Neural Space");
+                        ui.checkbox(&mut self.camera.auto_orbit, "Auto-Orbit 3D Neural Space (A)");
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.small_button("1:Iso").on_hover_text("Isometric 3/4 camera preset (1)").clicked() {
+                                self.camera.set_preset(-0.52, 0.24, 25.0, glam::Vec3::ZERO, false);
+                            }
+                            if ui.small_button("2:Sag").on_hover_text("Sagittal X-Y camera preset (2)").clicked() {
+                                self.camera.set_preset(0.0, 0.0, 25.0, glam::Vec3::ZERO, false);
+                            }
+                            if ui.small_button("3:Cor").on_hover_text("Coronal Y-Z camera preset (3)").clicked() {
+                                self.camera.set_preset(
+                                    std::f32::consts::FRAC_PI_2,
+                                    0.04,
+                                    25.0,
+                                    glam::Vec3::ZERO,
+                                    false,
+                                );
+                            }
+                            if ui.small_button("4:Top").on_hover_text("Top-Down X-Z camera preset (4)").clicked() {
+                                self.camera.set_preset(0.0, 1.35, 25.0, glam::Vec3::ZERO, false);
+                            }
+                            if ui.small_button("R:Reset").on_hover_text("Reset camera target & auto-orbit (R)").clicked() {
+                                self.camera.reset();
+                            }
+                        });
                     });
 
                     ui.add_space(6.0);
@@ -549,14 +682,14 @@ impl NeuroSpaceApp {
                     ui.group(|ui| {
                         ui.strong("6. Causal Lesion & Optogenetics Lab");
                         ui.horizontal_wrapped(|ui| {
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::Inspect, "🔍 Inspect")
-                                .on_hover_text("Inspect soma coordinates, membrane potential, activation, and gradient in 3D.");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::AblateLesion, "✂ Ablate")
-                                .on_hover_text("Click a 3D soma to toggle focal lesion ablation (silences outgoing signals).");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "[+] ChR2 (+)")
-                                .on_hover_text("Channelrhodopsin-2 photostimulation: click a 3D soma to clamp-excite it.");
-                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "[-] NpHR (-)")
-                                .on_hover_text("Halorhodopsin photoinhibition: click a 3D soma to optogenetically silence it.");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::Inspect, "🔍 Inspect (I)")
+                                .on_hover_text("Inspect soma coordinates, membrane potential, activation, and gradient in 3D (Hotkey: I).");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::AblateLesion, "✂ Ablate (X)")
+                                .on_hover_text("Click a 3D soma to toggle focal lesion ablation (silences outgoing signals) (Hotkey: X).");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::ChR2Excite, "[+] ChR2 (E)")
+                                .on_hover_text("Channelrhodopsin-2 photostimulation: click a 3D soma to clamp-excite it (Hotkey: E).");
+                            ui.selectable_value(&mut self.probe_tool, ProbeTool::NpHRSilence, "[-] NpHR (S)")
+                                .on_hover_text("Halorhodopsin photoinhibition: click a 3D soma to optogenetically silence it (Hotkey: S).");
                         });
                         ui.add(
                             egui::Slider::new(&mut self.sim.opto_clamp_drive, 0.2..=1.8)
@@ -631,7 +764,7 @@ impl NeuroSpaceApp {
         // Bottom Panel
         if self.show_bottom_matrix {
             egui::TopBottomPanel::bottom("bottom_lock_matrix")
-                .default_height(210.0)
+                .default_height(232.0)
                 .resizable(true)
                 .show(ctx, |ui| {
                     ui.columns(3, |cols| {
@@ -727,15 +860,21 @@ impl NeuroSpaceApp {
             let avail = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(avail, Sense::click_and_drag());
 
-            if resp.dragged() {
+            if resp.dragged_by(egui::PointerButton::Primary) {
                 let delta = resp.drag_delta();
-                self.camera.auto_orbit = false;
-                self.camera.yaw -= delta.x * 0.008;
-                self.camera.pitch = (self.camera.pitch + delta.y * 0.008).clamp(-1.35, 1.35);
+                self.camera.apply_orbit_delta(delta.x, delta.y);
+                ctx.request_repaint();
+            } else if resp.dragged_by(egui::PointerButton::Secondary)
+                || resp.dragged_by(egui::PointerButton::Middle)
+            {
+                let delta = resp.drag_delta();
+                self.camera.apply_pan_delta(delta.x, delta.y, avail.height());
+                ctx.request_repaint();
             }
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if resp.hovered() && scroll.abs() > 0.1 {
-                self.camera.distance = (self.camera.distance - scroll * 0.035).clamp(8.5, 54.0);
+                self.camera.apply_zoom_delta(scroll);
+                ctx.request_repaint();
             }
 
             let painter = ui.painter_at(avail);
@@ -804,32 +943,78 @@ impl NeuroSpaceApp {
                     );
                 }
             }
+
+            painter.text(
+                avail.max - egui::vec2(12.0, 10.0),
+                egui::Align2::RIGHT_BOTTOM,
+                "Left-Drag: Orbit | Right-Drag: Pan | Scroll: Zoom | 1-4: Views | R: Reset | F1: Help",
+                egui::FontId::monospace(10.0),
+                Color32::from_rgba_unmultiplied(148, 163, 184, 185),
+            );
         });
 
         if self.show_about_modal {
             let mut open = self.show_about_modal;
-            egui::Window::new("About NeuroSpace Lab")
+            egui::Window::new("About & Field Guide — NeuroSpace Lab")
                 .open(&mut open)
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(580.0)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.heading(
-                        RichText::new("NeuroSpace Lab v1.6.0")
-                            .color(Color32::from_rgb(56, 189, 248)),
-                    );
-                    ui.label("3D Neural Network Topology, Plasticity & Cerebral Cortex Wetware Lab");
-                    ui.separator();
-                    ui.strong("Copyright CRV Science Network");
-                    ui.small(
-                        "Licensed under GNU General Public License v3.0 or later (GPL-3.0-or-later).",
-                    );
-                    ui.small("Distributed in the hope that it will be useful, WITHOUT ANY WARRANTY.");
-                    ui.add_space(6.0);
-                    ui.hyperlink_to("CRV Science Network — https://crvscience.com", "https://crvscience.com");
-                    ui.hyperlink_to("CRV Science Public Apps — https://crvscience.com/apps", "https://crvscience.com/apps");
+                    ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                        ui.heading(
+                            RichText::new("NeuroSpace Lab v1.6.0")
+                                .color(Color32::from_rgb(56, 189, 248)),
+                        );
+                        ui.label("Safe-Rust 3D Neural Network Topology, Plasticity & Cerebral Cortex Grey-Matter Workstation");
+                        ui.separator();
+
+                        ui.strong("Keyboard Shortcuts & 3D Camera Navigation");
+                        egui::Grid::new("help_shortcuts_grid")
+                            .striped(true)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                for (key, desc) in [
+                                    ("Space", "Play / Pause continuous simulation"),
+                                    ("N or .", "Pause and single-step simulation by 1 tick"),
+                                    ("Left-Drag", "Orbit 3D Neural Space (with smooth inertial damping)"),
+                                    ("Right-Drag / Middle-Drag", "Pan 3D camera focal target"),
+                                    ("Scroll Wheel", "Zoom camera distance [8.5 .. 54.0]"),
+                                    ("1 / 2 / 3 / 4", "Camera Presets: Isometric / Sagittal / Coronal / Top-Down"),
+                                    ("R", "Reset camera to default Isometric + Auto-Orbit"),
+                                    ("A", "Toggle camera auto-orbit"),
+                                    ("I / X / E / S", "Probe Tools: Inspect / Ablate / ChR2 (+) / NpHR (-)"),
+                                    ("Shift + Click Soma", "Quick toggle focal ablation on hovered soma"),
+                                    ("Alt + Click Soma", "Quick toggle ChR2 photostimulation on hovered soma"),
+                                    ("F5 / F9", "SQLite WAL QuickSave / QuickLoad ('quicksave_f5')"),
+                                    ("Ctrl/Cmd+S / Ctrl/Cmd+O", "Export / Import SHA-256 .neuroworkset.json"),
+                                    ("F1 / Esc", "Toggle this Help / Close Modal or Clear Selection"),
+                                ] {
+                                    ui.label(RichText::new(key).monospace().strong().color(Color32::from_rgb(125, 211, 252)));
+                                    ui.label(desc);
+                                    ui.end_row();
+                                }
+                            });
+
+                        ui.separator();
+                        ui.strong("Causal Lesion, Tractotomy & Optogenetics Guide");
+                        ui.small("• Inspect (I): Displays Soma ID, laminar role (L1–L6 / MoE / Attention), 3D coordinates, apical dendritic Ca2+ plateau, activation, membrane Vm, bias, utility, and backprop gradient.");
+                        ui.small("• Focal Ablation (X or Shift+Click): Silences individual somata without removing downstream structures, engaging homeostatic gain (1.45x) and peri-infarct bypass sprouting.");
+                        ui.small("• ChR2 Photostimulation (E or Alt+Click): Channelrhodopsin-2 blue-light depolarizing clamp driving soma activation to ChR2 Laser Drive [0.2 .. 1.8] and triggering spikes in M7/M13.");
+                        ui.small("• NpHR Photoinhibition (S): Halorhodopsin yellow-light hyperpolarizing clamp silencing soma output (activation = 0.0) reversibly without structural ablation.");
+                        ui.small("• Tractotomy & Stroke: 'Sever Feedback' isolates top-down apical L1/predictive-error paths; 'Sever Skip/Lat' severs lateral & skip connections; 'Focal Stroke (25%)' lesions a local spatial cluster.");
+
+                        ui.separator();
+                        ui.strong("Copyright CRV Science Network");
+                        ui.small("Licensed under GNU General Public License v3.0 or later (GPL-3.0-or-later).");
+                        ui.small("Distributed in the hope that it will be useful, WITHOUT ANY WARRANTY.");
+                        ui.add_space(4.0);
+                        ui.hyperlink_to("CRV Science Network — https://crvscience.com", "https://crvscience.com");
+                        ui.hyperlink_to("CRV Science Public Apps — https://crvscience.com/apps", "https://crvscience.com/apps");
+                    });
                     ui.add_space(8.0);
-                    if ui.button("Close").clicked() {
+                    if ui.button("Close (Esc)").clicked() {
                         self.show_about_modal = false;
                     }
                 });
@@ -860,7 +1045,7 @@ fn draw_sparkline(
         });
     });
 
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail_w, 56.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail_w, 68.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 28));
     painter.rect_stroke(
@@ -870,14 +1055,23 @@ fn draw_sparkline(
         egui::StrokeKind::Outside,
     );
 
+    let has_top_band = pre_lesion.is_some() || acute_lesion.is_some() || !lesion_events.is_empty();
+    let top_pad = if has_top_band { 14.0 } else { 6.0 };
     let plot = egui::Rect::from_min_max(
-        egui::Pos2::new(rect.min.x + 36.0, rect.min.y + 5.0),
-        egui::Pos2::new(rect.max.x - 6.0, rect.max.y - 5.0),
+        egui::Pos2::new(rect.min.x + 36.0, rect.min.y + top_pad),
+        egui::Pos2::new(rect.max.x - 6.0, rect.max.y - 13.0),
     );
     painter.line_segment(
         [
             egui::Pos2::new(plot.min.x, plot.min.y),
             egui::Pos2::new(plot.min.x, plot.max.y),
+        ],
+        egui::Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(71, 85, 105, 110)),
+    );
+    painter.line_segment(
+        [
+            egui::Pos2::new(plot.min.x, plot.max.y),
+            egui::Pos2::new(plot.max.x, plot.max.y),
         ],
         egui::Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(71, 85, 105, 110)),
     );
@@ -924,19 +1118,55 @@ fn draw_sparkline(
         plot.max.y - norm * plot.height()
     };
 
-    // Optional Pre / Acute lesion reference lines
-    if let Some(pre) = pre_lesion {
-        let y = y_of(pre);
-        painter.line_segment(
-            [egui::Pos2::new(plot.min.x, y), egui::Pos2::new(plot.max.x, y)],
-            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 160)),
-        );
-    }
+    // Pre / Acute lesion reference lines + compact top legend
+    let pre_col = Color32::from_rgb(56, 189, 248);
+    let acute_col = Color32::from_rgb(244, 63, 94);
+    let mut legend_x = plot.max.x - 2.0;
     if let Some(acute) = acute_lesion {
         let y = y_of(acute);
         painter.line_segment(
             [egui::Pos2::new(plot.min.x, y), egui::Pos2::new(plot.max.x, y)],
-            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 160)),
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 165)),
+        );
+        let lbl = format!("Acute {:.1}%", acute);
+        let lw = lbl.len() as f32 * 5.4 + 12.0;
+        painter.line_segment(
+            [
+                egui::Pos2::new(legend_x - lw, rect.min.y + 6.5),
+                egui::Pos2::new(legend_x - lw + 8.0, rect.min.y + 6.5),
+            ],
+            egui::Stroke::new(1.8_f32, acute_col),
+        );
+        painter.text(
+            egui::Pos2::new(legend_x, rect.min.y + 2.0),
+            egui::Align2::RIGHT_TOP,
+            lbl,
+            egui::FontId::monospace(8.5),
+            acute_col,
+        );
+        legend_x -= lw + 8.0;
+    }
+    if let Some(pre) = pre_lesion {
+        let y = y_of(pre);
+        painter.line_segment(
+            [egui::Pos2::new(plot.min.x, y), egui::Pos2::new(plot.max.x, y)],
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 165)),
+        );
+        let lbl = format!("Pre {:.1}%", pre);
+        let lw = lbl.len() as f32 * 5.4 + 12.0;
+        painter.line_segment(
+            [
+                egui::Pos2::new(legend_x - lw, rect.min.y + 6.5),
+                egui::Pos2::new(legend_x - lw + 8.0, rect.min.y + 6.5),
+            ],
+            egui::Stroke::new(1.8_f32, pre_col),
+        );
+        painter.text(
+            egui::Pos2::new(legend_x, rect.min.y + 2.0),
+            egui::Align2::RIGHT_TOP,
+            lbl,
+            egui::FontId::monospace(8.5),
+            pre_col,
         );
     }
 
@@ -949,13 +1179,32 @@ fn draw_sparkline(
         }
     };
 
-    for (ev_idx, _tag) in lesion_events {
+    // Render lesion event vertical markers + tag labels cleanly
+    let mut last_tag_x = f32::NEG_INFINITY;
+    for (ev_idx, tag) in lesion_events {
         if *ev_idx < n {
             let ex = x_of(*ev_idx);
             painter.line_segment(
                 [egui::Pos2::new(ex, plot.min.y), egui::Pos2::new(ex, plot.max.y)],
-                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 175)),
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 63, 94, 185)),
             );
+            let tag_w = (tag.len() as f32 * 5.2 + 6.0).clamp(24.0, 64.0);
+            let tx = ex.clamp(plot.min.x + tag_w * 0.5, (plot.max.x - tag_w * 0.5).max(plot.min.x));
+            if (tx - last_tag_x).abs() >= tag_w * 0.85 {
+                let tag_rect = egui::Rect::from_center_size(
+                    egui::Pos2::new(tx, rect.min.y + 6.5),
+                    egui::vec2(tag_w, 11.0),
+                );
+                painter.rect_filled(tag_rect, 2.0, Color32::from_rgba_unmultiplied(15, 23, 42, 225));
+                painter.text(
+                    tag_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tag,
+                    egui::FontId::monospace(8.2),
+                    Color32::from_rgb(253, 164, 175),
+                );
+                last_tag_x = tx;
+            }
         }
     }
 
@@ -971,6 +1220,7 @@ fn draw_sparkline(
         painter.circle_filled(last_pt, 2.6, color);
     }
 
+    // Y-axis min / max labels
     let min_lbl = if is_percent {
         format!("{min_v:.0}%")
     } else {
@@ -995,6 +1245,39 @@ fn draw_sparkline(
         egui::FontId::monospace(9.0),
         Color32::from_rgb(148, 163, 184),
     );
+
+    // X-axis sample/step ticks along bottom axis
+    let tick_indices: Vec<usize> = if n <= 1 {
+        vec![0]
+    } else if n < 5 {
+        vec![0, n - 1]
+    } else {
+        vec![0, n / 2, n - 1]
+    };
+    for (ti, &idx) in tick_indices.iter().enumerate() {
+        let tx = x_of(idx);
+        painter.line_segment(
+            [
+                egui::Pos2::new(tx, plot.max.y),
+                egui::Pos2::new(tx, plot.max.y + 3.0),
+            ],
+            egui::Stroke::new(0.9_f32, Color32::from_rgb(100, 116, 139)),
+        );
+        let align = if ti == 0 {
+            egui::Align2::LEFT_BOTTOM
+        } else if ti + 1 == tick_indices.len() {
+            egui::Align2::RIGHT_BOTTOM
+        } else {
+            egui::Align2::CENTER_BOTTOM
+        };
+        painter.text(
+            egui::Pos2::new(tx, rect.max.y - 1.0),
+            align,
+            format!("#{}", idx + 1),
+            egui::FontId::monospace(8.2),
+            Color32::from_rgb(148, 163, 184),
+        );
+    }
 
     if let Some(hover_pos) = resp.hover_pos() {
         let idx = if n <= 1 || plot.width() <= 1.0 {
