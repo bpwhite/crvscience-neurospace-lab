@@ -19,7 +19,9 @@ use neurospace_lab::datasets::DatasetId;
 use neurospace_lab::engine::{
     stdp_trace_delta, NeuralSpaceSim, NeuronRole, OptoClamp, M7_LIF_DT_PASS,
 };
-use neurospace_lab::gui::{NeuroSpaceApp, ProbeTool};
+use neurospace_lab::gui::{
+    build_palette_entries, search_palette_entries, NeuroSpaceApp, PaletteAction, ProbeTool,
+};
 use neurospace_lab::icon::app_egui_icon;
 use neurospace_lab::models::{ModelArch, OutputGoal, RenderMode};
 use neurospace_lab::persistence::{LabStore, WorksetEnvelope};
@@ -1044,4 +1046,205 @@ fn headless_gui_camera_probe_hotkeys_and_3d_clipping_and_bezier() {
         cam.project_segment(&vp, rect, in_front, far_right).is_some(),
         "segment exiting viewport edge must clip cleanly without edge pop-out"
     );
+}
+
+#[test]
+fn network_efficiency_and_firing_rate_respond_to_ablations_and_clamps() {
+    let mut sim = NeuralSpaceSim::new(
+        ModelArch::M13CerebralCortexGreyMatter,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    for _ in 0..15 {
+        sim.step_simulation();
+    }
+    let (eff_intact, rate_intact) = sim.compute_network_efficiency_and_firing_rate();
+    assert!(eff_intact > 0.0 && eff_intact <= 1.0);
+    assert!(rate_intact > 0.0 && rate_intact.is_finite());
+
+    let severed = sim.sever_feedback_tracts();
+    assert!(severed > 0);
+    let _ = sim.induce_focal_stroke();
+    let (eff_lesioned, _) = sim.compute_network_efficiency_and_firing_rate();
+    assert!(eff_lesioned <= eff_intact + 1e-5);
+}
+
+#[test]
+fn plasticity_bifurcation_sweep_produces_regime_transitions() {
+    let sim = NeuralSpaceSim::new(
+        ModelArch::M13CerebralCortexGreyMatter,
+        DatasetId::D4PlantSpecies,
+        2026,
+    );
+    let digest = sim.run_plasticity_bifurcation_sweep(25);
+    assert_eq!(digest.points.len(), 6);
+    assert!(digest.critical_prune_threshold > 0.0 && digest.critical_prune_threshold <= 0.25);
+    assert!(digest.peak_efficiency_score > 0.0);
+    assert_eq!(digest.points[0].regime_label, "Hyperplastic Dense");
+    for p in &digest.points {
+        assert!(p.network_efficiency.is_finite() && p.network_efficiency >= 0.0);
+        assert!(p.mean_firing_rate.is_finite() && p.mean_firing_rate >= 0.0);
+        assert!(p.primary_score.is_finite());
+    }
+    assert!(
+        digest.points[0].active_synapses >= digest.points[5].active_synapses,
+        "Hyperplastic regime should retain at least as many synapses as heavy pruning"
+    );
+}
+
+#[test]
+fn plasticity_bifurcation_digest_json_and_csv_roundtrip() {
+    let sim = NeuralSpaceSim::new(ModelArch::M11CorticalColumnsHtm, DatasetId::D6RoboticsNavigation, 7);
+    let digest = sim.run_plasticity_bifurcation_sweep(10);
+    let json = digest.to_json_pretty().expect("serialize bifurcation json");
+    let decoded: neurospace_lab::engine::PlasticityBifurcationDigest =
+        serde_json::from_str(&json).expect("roundtrip bifurcation json");
+    assert_eq!(decoded.points.len(), 6);
+    assert_eq!(decoded.model, ModelArch::M11CorticalColumnsHtm);
+
+    let csv = digest.to_csv();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines.len(), 7);
+    assert!(lines[0].contains("network_efficiency"));
+    assert!(lines[0].contains("mean_firing_rate"));
+    assert!(lines[0].contains("regime_label"));
+}
+
+#[test]
+fn ctrl_k_palette_searches_regions_plasticity_stimulation_views_and_exports() {
+    let entries = build_palette_entries();
+    assert!(entries.len() >= 30);
+
+    let region_hits = search_palette_entries(&entries, "thick-tufted", 5);
+    assert!(region_hits
+        .iter()
+        .any(|e| matches!(e.action, PaletteAction::FocusCorticalRole(NeuronRole::ThickPyramidalL5))));
+
+    let plast_hits = search_palette_entries(&entries, "neurogenesis", 5);
+    assert!(plast_hits
+        .iter()
+        .any(|e| matches!(e.action, PaletteAction::ApplyPlasticityProtocol("neurogenesis"))));
+
+    let stim_hits = search_palette_entries(&entries, "chr2", 5);
+    assert!(stim_hits
+        .iter()
+        .any(|e| matches!(e.action, PaletteAction::ApplyStimulationPreset("chr2_drive"))));
+
+    let view_hits = search_palette_entries(&entries, "sagittal", 5);
+    assert!(view_hits
+        .iter()
+        .any(|e| matches!(e.action, PaletteAction::SetCameraPreset(2))));
+
+    let exp_hits = search_palette_entries(&entries, "bifurcation csv", 5);
+    assert!(exp_hits
+        .iter()
+        .any(|e| matches!(e.action, PaletteAction::ExportBifurcationCsv)));
+}
+
+#[test]
+fn headless_gui_ctrl_k_blocks_hotkeys_and_executes_region_and_protocol() {
+    let ctx = egui::Context::default();
+    let mut app = NeuroSpaceApp::new_headless();
+    app.running = false;
+
+    let send = |app: &mut NeuroSpaceApp, key: egui::Key, mods: egui::Modifiers, text: Option<&str>| {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            modifiers: mods,
+            ..Default::default()
+        };
+        if let Some(t) = text {
+            raw.events.push(egui::Event::Text(t.to_string()));
+        }
+        raw.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        });
+        let _ = ctx.run(raw, |ctx| app.ui_step(ctx));
+    };
+
+    // Warmup
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.ui_step(ctx),
+    );
+
+    send(&mut app, egui::Key::K, egui::Modifiers::CTRL, None);
+    assert!(app.cmd_palette_open);
+    send(&mut app, egui::Key::S, egui::Modifiers::NONE, Some("spiny stellate"));
+    assert_eq!(app.probe_tool, ProbeTool::Inspect, "Typing in Ctrl+K must not switch probe tool");
+    send(&mut app, egui::Key::Enter, egui::Modifiers::NONE, None);
+    assert!(!app.cmd_palette_open);
+    let sel = app.selected_neuron.expect("selected L4 neuron");
+    assert_eq!(app.sim.neurons[sel].role, NeuronRole::SpinyStellateL4);
+
+    app.execute_palette_action(PaletteAction::ApplyPlasticityProtocol("pruning"));
+    assert!((app.sim.params.prune_threshold - 0.14).abs() < 1e-5);
+}
+
+#[test]
+fn headless_gui_ctrl_k_executes_plasticity_sweep_and_opens_digest_modal() {
+    let mut app = NeuroSpaceApp::new_headless();
+    app.running = false;
+    assert!(app.last_bifurcation_digest.is_none());
+    app.execute_palette_action(PaletteAction::RunPlasticitySweep);
+    assert!(app.show_bifurcation_modal);
+    let digest = app.last_bifurcation_digest.as_ref().expect("digest populated");
+    assert_eq!(digest.points.len(), 6);
+}
+
+#[test]
+fn headless_gui_escape_cascades_palette_and_bifurcation_modals() {
+    let ctx = egui::Context::default();
+    let mut app = NeuroSpaceApp::new_headless();
+    app.running = false;
+    app.cmd_palette_open = true;
+    app.show_bifurcation_modal = true;
+    app.show_about_modal = true;
+    app.selected_neuron = Some(0);
+
+    let press_esc = |app: &mut NeuroSpaceApp| {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(raw, |ctx| app.ui_step(ctx));
+    };
+
+    press_esc(&mut app);
+    assert!(!app.cmd_palette_open);
+    assert!(app.show_bifurcation_modal);
+
+    press_esc(&mut app);
+    assert!(!app.show_bifurcation_modal);
+    assert!(app.show_about_modal);
+
+    press_esc(&mut app);
+    assert!(!app.show_about_modal);
+    assert_eq!(app.selected_neuron, Some(0));
+
+    press_esc(&mut app);
+    assert!(app.selected_neuron.is_none());
 }

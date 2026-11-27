@@ -67,6 +67,24 @@ enum Commands {
     },
     /// Emit a portable SHA-256 verified .neuroworkset.json snapshot to stdout
     ExportSampleWorkset,
+    /// Run structural plasticity parameter-sweep & network-efficiency/firing-rate bifurcation digest
+    PlasticitySweep {
+        /// Model code (M0..M14)
+        #[arg(short, long, default_value = "M13")]
+        model: String,
+        /// Dataset code (D1..D7)
+        #[arg(short, long, default_value = "D4")]
+        dataset: String,
+        /// Simulation steps per sweep point
+        #[arg(short, long, default_value_t = 25)]
+        steps: usize,
+        /// Output format: table, json, or csv
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Optional path to write JSON or CSV output
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[cfg(windows)]
@@ -175,6 +193,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let env = WorksetEnvelope::from_sim(&sim, RenderMode::AutoAdaptive, 1.0);
             println!("{}", serde_json::to_string_pretty(&env)?);
+        }
+        Commands::PlasticitySweep {
+            model,
+            dataset,
+            steps,
+            format,
+            out,
+        } => {
+            let arch = ModelArch::from_code(&model)?;
+            let ds = DatasetId::from_code(&dataset)?;
+            let sim = NeuralSpaceSim::new(arch, ds, 2026);
+            let digest = sim.run_plasticity_bifurcation_sweep(steps);
+            let text = match format.to_ascii_lowercase().as_str() {
+                "json" => digest.to_json_pretty()?,
+                "csv" => digest.to_csv(),
+                "table" => {
+                    let mut buf = format!(
+                        "=== Plasticity Bifurcation Digest: {} / {} (critical_prune={:.3}, peak_eff={:.4}) ===\n",
+                        digest.model.code(),
+                        digest.dataset.code(),
+                        digest.critical_prune_threshold,
+                        digest.peak_efficiency_score
+                    );
+                    buf.push_str(&format!(
+                        "{:<7} {:<7} {:<20} {:>6} {:>6} {:>9} {:>9} {:>8}\n",
+                        "Prune", "Growth", "Regime", "Neur", "Syn", "FireRate", "NetEff", "Score%"
+                    ));
+                    for p in &digest.points {
+                        buf.push_str(&format!(
+                            "{:<7.3} {:<7.2} {:<20} {:>6} {:>6} {:>9.4} {:>9.4} {:>7.2}%\n",
+                            p.prune_threshold,
+                            p.plasticity_growth,
+                            p.regime_label,
+                            p.active_neurons,
+                            p.active_synapses,
+                            p.mean_firing_rate,
+                            p.network_efficiency,
+                            p.primary_score
+                        ));
+                    }
+                    buf
+                }
+                other => {
+                    return Err(format!("Unsupported format '{other}'; expected table, json, or csv").into());
+                }
+            };
+            if let Some(out_path) = out {
+                std::fs::write(&out_path, &text)?;
+                println!(
+                    "Wrote plasticity bifurcation digest ({format}) to {}",
+                    out_path.display()
+                );
+            } else {
+                println!("{text}");
+            }
         }
     }
     Ok(())

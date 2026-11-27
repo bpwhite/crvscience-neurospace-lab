@@ -189,6 +189,68 @@ pub struct SweepProgress {
     pub total_entries: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlasticityBifurcationPoint {
+    pub prune_threshold: f32,
+    pub plasticity_growth: f32,
+    pub regime_label: String,
+    pub active_neurons: usize,
+    pub active_synapses: usize,
+    pub mean_firing_rate: f32,
+    pub network_efficiency: f32,
+    pub primary_score: f32,
+    pub loss: f32,
+    pub metabolic_flux: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlasticityBifurcationDigest {
+    pub model: ModelArch,
+    pub dataset: DatasetId,
+    pub steps_per_point: usize,
+    pub critical_prune_threshold: f32,
+    pub peak_efficiency_score: f32,
+    pub points: Vec<PlasticityBifurcationPoint>,
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+impl PlasticityBifurcationDigest {
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn to_csv(&self) -> String {
+        let mut out = String::from(
+            "model,dataset,prune_threshold,plasticity_growth,regime_label,active_neurons,active_synapses,mean_firing_rate,network_efficiency,primary_score,loss,metabolic_flux\n",
+        );
+        for p in &self.points {
+            out.push_str(&format!(
+                "{},{},{:.4},{:.4},{},{},{},{:.6},{:.6},{:.4},{:.6},{:.6}\n",
+                csv_escape(self.model.code()),
+                csv_escape(self.dataset.code()),
+                p.prune_threshold,
+                p.plasticity_growth,
+                csv_escape(&p.regime_label),
+                p.active_neurons,
+                p.active_synapses,
+                p.mean_firing_rate,
+                p.network_efficiency,
+                p.primary_score,
+                p.loss,
+                p.metabolic_flux,
+            ));
+        }
+        out
+    }
+}
+
 impl SweepProgress {
     pub fn fraction(&self) -> f32 {
         if self.total_steps == 0 {
@@ -3092,6 +3154,153 @@ impl NeuralSpaceSim {
         self.synapse_history.push(self.synapses.len());
         if self.synapse_history.len() > 180 {
             self.synapse_history.remove(0);
+        }
+    }
+
+    /// Computes global topological network efficiency (inverse shortest-path hops across active
+    /// synapses) and mean firing/activation rate across intact somata.
+    pub fn compute_network_efficiency_and_firing_rate(&self) -> (f32, f32) {
+        let n = self.neurons.len();
+        if n == 0 {
+            return (0.0, 0.0);
+        }
+        let active: Vec<usize> = (0..n).filter(|&i| !self.neurons[i].ablated).collect();
+        let act_count = active.len();
+        if act_count == 0 {
+            return (0.0, 0.0);
+        }
+
+        let mut firing_sum = 0.0_f32;
+        for &i in &active {
+            let mut rate = self.neurons[i].activation.abs();
+            if self.neurons[i].spiked {
+                rate = rate.max(0.75);
+            }
+            firing_sum += rate;
+        }
+        let mean_firing_rate = firing_sum / (act_count as f32);
+
+        if act_count < 2 {
+            return (0.0, mean_firing_rate);
+        }
+
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for syn in &self.synapses {
+            if syn.severed || syn.weight.abs() < 1e-4 {
+                continue;
+            }
+            if syn.from < n
+                && syn.to < n
+                && !self.neurons[syn.from].ablated
+                && !self.neurons[syn.to].ablated
+                && syn.from != syn.to
+            {
+                adj[syn.from].push(syn.to);
+            }
+        }
+
+        let mut inv_dist_sum = 0.0_f32;
+        let mut queue = std::collections::VecDeque::with_capacity(n);
+        let mut dist = vec![u32::MAX; n];
+        for &src in &active {
+            dist.fill(u32::MAX);
+            dist[src] = 0;
+            queue.clear();
+            queue.push_back(src);
+            while let Some(u) = queue.pop_front() {
+                let next_d = dist[u] + 1;
+                for &v in &adj[u] {
+                    if dist[v] == u32::MAX {
+                        dist[v] = next_d;
+                        inv_dist_sum += 1.0 / (next_d as f32);
+                        queue.push_back(v);
+                    }
+                }
+            }
+        }
+        let pairs = (act_count * (act_count - 1)) as f32;
+        let network_efficiency = (inv_dist_sum / pairs).clamp(0.0, 1.0);
+        (network_efficiency, mean_firing_rate)
+    }
+
+    /// Runs a deterministic structural-plasticity parameter sweep across `(prune_threshold, plasticity_growth)`
+    /// regimes and summarizes network-efficiency & firing-rate bifurcations.
+    pub fn run_plasticity_bifurcation_sweep(
+        &self,
+        steps_per_point: usize,
+    ) -> PlasticityBifurcationDigest {
+        let steps = steps_per_point.clamp(5, 120);
+        let grid: [(f32, f32); 6] = [
+            (0.00, 0.70),
+            (0.03, 0.55),
+            (0.06, 0.38),
+            (0.10, 0.24),
+            (0.15, 0.10),
+            (0.21, 0.02),
+        ];
+
+        let mut points = Vec::with_capacity(grid.len());
+        for &(prune_t, growth_p) in &grid {
+            let mut probe = Self::new(self.model, self.dataset_id, 2026);
+            probe.goal = self.goal;
+            probe.params = self.params.clone();
+            probe.params.prune_threshold = prune_t;
+            probe.params.plasticity_growth = growth_p;
+            for _ in 0..steps {
+                probe.step_simulation();
+            }
+            let (network_efficiency, mean_firing_rate) =
+                probe.compute_network_efficiency_and_firing_rate();
+            let active_neurons = probe.neurons.iter().filter(|n| !n.ablated).count();
+            let active_synapses = probe.synapses.iter().filter(|s| !s.severed).count();
+            let regime_label = if prune_t <= 0.02 {
+                "Hyperplastic Dense".to_string()
+            } else if network_efficiency >= 0.14 && mean_firing_rate >= 0.18 && prune_t <= 0.08 {
+                "Poised Homeostatic".to_string()
+            } else if active_synapses <= (probe.input_ids.len() + probe.output_ids.len() * 2).max(28)
+                || network_efficiency < 0.08
+            {
+                "Subcritical Pruned".to_string()
+            } else {
+                "Critical Transition".to_string()
+            };
+            points.push(PlasticityBifurcationPoint {
+                prune_threshold: prune_t,
+                plasticity_growth: growth_p,
+                regime_label,
+                active_neurons,
+                active_synapses,
+                mean_firing_rate,
+                network_efficiency,
+                primary_score: probe.primary_metric,
+                loss: probe.current_loss,
+                metabolic_flux: probe.metabolic_flux,
+            });
+        }
+
+        let mut critical_prune_threshold = grid[2].0;
+        let mut max_drop = -1.0_f32;
+        for w in points.windows(2) {
+            let prod0 = w[0].network_efficiency * (w[0].mean_firing_rate + 0.05);
+            let prod1 = w[1].network_efficiency * (w[1].mean_firing_rate + 0.05);
+            let drop = (prod0 - prod1).abs();
+            if drop > max_drop {
+                max_drop = drop;
+                critical_prune_threshold = 0.5 * (w[0].prune_threshold + w[1].prune_threshold);
+            }
+        }
+        let peak_efficiency_score = points
+            .iter()
+            .map(|p| p.network_efficiency)
+            .fold(0.0_f32, f32::max);
+
+        PlasticityBifurcationDigest {
+            model: self.model,
+            dataset: self.dataset_id,
+            steps_per_point: steps,
+            critical_prune_threshold,
+            peak_efficiency_score,
+            points,
         }
     }
 }

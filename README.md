@@ -50,9 +50,10 @@ All single-key navigation and wetbench shortcuts are guarded by `!ctx.wants_keyb
 | `Shift + Click` soma | Quick toggle focal lesion ablation on hovered soma |
 | `Alt + Click` soma | Quick toggle optogenetic ChR2 excitation clamp on hovered soma |
 | `F5` / `F9` | SQLite WAL QuickSave / QuickLoad (`quicksave_f5` slot) |
+| `Ctrl/Cmd + K` | Open Fuzzy Command Palette (switch cortical regions, plasticity protocols, stimulation presets, views, exports) |
 | `Ctrl/Cmd + S` / `Ctrl/Cmd + O` | Export / Import SHA-256 verified `.neuroworkset.json` snapshot |
 | `F1` | Toggle About & Keyboard / Optogenetics Field Guide modal |
-| `Esc` | Close Help modal first, then clear selected neuron inspection card |
+| `Esc` | Close Command Palette / Bifurcation Modal / Help Modal first, then clear selected soma |
 
 ---
 
@@ -64,6 +65,7 @@ All single-key navigation and wetbench shortcuts are guarded by `!ctx.wants_keyb
 | `--headless-screenshot <PNG_PATH>` | `--screenshot-view <1\|2\|3>` (default `1`) | Renders a `1600x1000` offscreen RGBA PNG via `wgpu` and exits |
 | `bench-dataset` | `-d, --dataset <D1..D7>` (`D4`), `-s, --steps <N>` (`60`) | Locks dataset and benchmarks all 15 architectures (`M0`–`M14`) |
 | `bench-model` | `-m, --model <M0..M14>` (`M13`), `-s, --steps <N>` (`60`) | Locks architecture and benchmarks all 7 datasets (`D1`–`D7`) |
+| `plasticity-sweep` | `-m, --model`, `-d, --dataset`, `-s, --steps`, `--format <table\|json\|csv>`, `--out <PATH>` | Runs structural plasticity parameter sweep & network-efficiency / firing-rate bifurcation digest |
 | `export-sample-workset` | — | Steps `M13` on `D7` for 25 ticks and prints SHA-256 `.neuroworkset.json` to stdout |
 
 ---
@@ -102,7 +104,7 @@ Baseline manifest recorded in [`validation/neurospace_lab_validation_summary.jso
 | Models / Datasets | `15` (`M0`–`M14`) / `7` (`D1`–`D7`) | `src/models.rs`, `src/datasets.rs` |
 | Preprint Reference | `APP-PREPRINT-19` | `validation/neurospace_lab_validation_summary.json` |
 | Baseline Validation Suite | `13 passed / 13 total` (`2.17 s`) | `validation/neurospace_lab_validation_summary.json` |
-| Upgraded Integration Suite | `20 passed; 0 failed; 0 ignored` (`0` compiler warnings via `CARGO_BUILD_JOBS=4 cargo test --all-targets`) | `tests/integration_suite.rs` |
+| Upgraded Integration Suite | `27 passed; 0 failed; 0 ignored` (`0` compiler warnings via `CARGO_BUILD_JOBS=2 cargo test --release`) | `tests/integration_suite.rs` |
 
 ---
 

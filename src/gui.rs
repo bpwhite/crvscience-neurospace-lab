@@ -14,7 +14,7 @@
 // along with this program.  If not, see <https://gnu.org>.
 
 use crate::datasets::DatasetId;
-use crate::engine::{NeuralSpaceSim, OptoClamp};
+use crate::engine::{NeuralSpaceSim, NeuronRole, OptoClamp, PlasticityBifurcationDigest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeTool {
@@ -22,6 +22,223 @@ pub enum ProbeTool {
     AblateLesion,
     ChR2Excite,
     NpHRSilence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteAction {
+    SelectModel(ModelArch),
+    FocusCorticalRole(NeuronRole),
+    ApplyPlasticityProtocol(&'static str),
+    ApplyStimulationPreset(&'static str),
+    SetCameraPreset(u8),
+    ToggleAutoOrbit,
+    SetRenderMode(RenderMode),
+    ToggleBottomMatrix,
+    RunPlasticitySweep,
+    ExportBifurcationJson,
+    ExportBifurcationCsv,
+    ExportWorksetJson,
+    QuickSaveF5,
+    QuickLoadF9,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaletteEntry {
+    pub category: String,
+    pub title: String,
+    pub subtitle: String,
+    pub action: PaletteAction,
+    search_blob: String,
+}
+
+pub fn build_palette_entries() -> Vec<PaletteEntry> {
+    let mut entries = Vec::new();
+    let mut push = |cat: &str, title: String, sub: String, act: PaletteAction| {
+        let blob = format!(
+            "{} {} {}",
+            cat.to_ascii_lowercase(),
+            title.to_ascii_lowercase(),
+            sub.to_ascii_lowercase()
+        );
+        entries.push(PaletteEntry {
+            category: cat.to_string(),
+            title,
+            subtitle: sub,
+            action: act,
+            search_blob: blob,
+        });
+    };
+
+    for arch in ModelArch::ALL {
+        push(
+            "Architecture",
+            format!("{} — {}", arch.code(), arch.name()),
+            arch.learning_rule_summary().to_string(),
+            PaletteAction::SelectModel(arch),
+        );
+    }
+
+    for (role, title, sub) in [
+        (NeuronRole::SensoryInput, "Cortical Region: Thalamus / Sensory Input", "Focus afferent sensory / thalamic relay soma"),
+        (NeuronRole::SpinyStellateL4, "Cortical Region: Layer 4 Spiny Stellate", "Focus granular thalamocortical recipient lamina"),
+        (NeuronRole::PyramidalL23, "Cortical Region: Layer 2/3 Association Pyramidal", "Focus supragranular cortico-cortical pyramidal neuron"),
+        (NeuronRole::ThickPyramidalL5, "Cortical Region: Layer 5 Thick-Tufted Pyramidal", "Focus subcortical burst-coupled pyramidal projection"),
+        (NeuronRole::CorticothalamicL6, "Cortical Region: Layer 6 Corticothalamic", "Focus deep feedback corticothalamic soma"),
+        (NeuronRole::MolecularInterneuronL1, "Cortical Region: Layer 1 Apical Interneuron", "Focus molecular layer apical tuft modulation"),
+        (NeuronRole::InhibitoryInterneuron, "Cortical Region: GABAergic Basket/Martinotti", "Focus inhibitory microcircuit interneuron"),
+        (NeuronRole::AstrocyteGlia, "Cortical Region: Protoplasmic Astrocyte", "Focus tripartite astrocytic calcium glia"),
+        (NeuronRole::MoeRouter, "Region: Top-2 Sparse MoE Router", "Focus Frontier LLM mixture-of-experts gating router"),
+    ] {
+        push(
+            "Cortical Region",
+            title.to_string(),
+            sub.to_string(),
+            PaletteAction::FocusCorticalRole(role),
+        );
+    }
+
+    for (id, title, sub) in [
+        ("balanced", "Plasticity: Homeostatic Balanced Regime", "Set prune_threshold=0.045, plasticity_growth=0.35"),
+        ("neurogenesis", "Plasticity: High Neurogenesis & Axonal Sprouting", "Set prune_threshold=0.025, plasticity_growth=0.85"),
+        ("pruning", "Plasticity: Aggressive Synaptic Pruning", "Set prune_threshold=0.140, plasticity_growth=0.12"),
+        ("frozen", "Plasticity: Static / Frozen Structural Graph", "Set prune_threshold=0.000, plasticity_growth=0.00"),
+    ] {
+        push(
+            "Plasticity",
+            title.to_string(),
+            sub.to_string(),
+            PaletteAction::ApplyPlasticityProtocol(id),
+        );
+    }
+    push(
+        "Plasticity",
+        "Run Structural Plasticity Bifurcation Sweep".to_string(),
+        "Sweep prune/growth parameters and inspect efficiency & firing-rate bifurcations".to_string(),
+        PaletteAction::RunPlasticitySweep,
+    );
+
+    for (id, title, sub) in [
+        ("chr2_drive", "Stimulation: ChR2 Blue-Light Cortical Excitation", "Arm ChR2 tool (drive=1.55) and photostimulate hidden/L4 soma"),
+        ("nphr_silence", "Stimulation: NpHR Yellow-Light Photoinhibition", "Arm NpHR tool and hyperpolarize representative cortical soma"),
+        ("focal_stroke", "Stimulation / Lesion: Focal Cluster Stroke (25%)", "Ablate 25% spatial cluster to probe peri-infarct recovery"),
+        ("sever_feedback", "Stimulation / Lesion: Sever Top-Down Feedback", "Cut reverse L1/predictive-error feedback tracts"),
+        ("heal_all", "Stimulation: Heal All Lesions, Tracts & Clamps", "Restore full intact structural connectome and clear clamps"),
+    ] {
+        push(
+            "Stimulation",
+            title.to_string(),
+            sub.to_string(),
+            PaletteAction::ApplyStimulationPreset(id),
+        );
+    }
+
+    for (preset, title, sub) in [
+        (1, "View: Camera Isometric 3/4 (1)", "Smoothly reset to default 3/4 orbital framing"),
+        (2, "View: Camera Sagittal X-Y (2)", "Align camera to sagittal laminar cross-section"),
+        (3, "View: Camera Coronal Y-Z (3)", "Align camera to coronal transverse slice"),
+        (4, "View: Camera Top-Down X-Z (4)", "Align camera to dorsal top-down projection"),
+    ] {
+        push(
+            "View",
+            title.to_string(),
+            sub.to_string(),
+            PaletteAction::SetCameraPreset(preset),
+        );
+    }
+    push(
+        "View",
+        "View: Toggle Camera Auto-Orbit (A)".to_string(),
+        "Pause or resume continuous 3D orbital rotation".to_string(),
+        PaletteAction::ToggleAutoOrbit,
+    );
+    push(
+        "View",
+        "View: Toggle Bottom Lock Matrix & Sparklines".to_string(),
+        "Show or collapse telemetry sparklines and comparison ledger".to_string(),
+        PaletteAction::ToggleBottomMatrix,
+    );
+    for rm in RenderMode::ALL {
+        push(
+            "Render",
+            format!("Render: {}", rm.label()),
+            "Switch 3D soma/dendrite morphology continuum".to_string(),
+            PaletteAction::SetRenderMode(rm),
+        );
+    }
+
+    push(
+        "Export",
+        "Export: Plasticity Bifurcation Digest (.json)".to_string(),
+        "Write structural plasticity sweep & bifurcation metrics to JSON".to_string(),
+        PaletteAction::ExportBifurcationJson,
+    );
+    push(
+        "Export",
+        "Export: Plasticity Bifurcation Digest (.csv)".to_string(),
+        "Write structural plasticity sweep & bifurcation metrics to CSV".to_string(),
+        PaletteAction::ExportBifurcationCsv,
+    );
+    push(
+        "Export",
+        "Export: Verified .neuroworkset.json Snapshot (Ctrl+S)".to_string(),
+        "Save SHA-256 verified network topology and weights".to_string(),
+        PaletteAction::ExportWorksetJson,
+    );
+    push(
+        "Vault",
+        "Vault: SQLite QuickSave (F5)".to_string(),
+        "Persist current simulation state into quicksave_f5 slot".to_string(),
+        PaletteAction::QuickSaveF5,
+    );
+    push(
+        "Vault",
+        "Vault: SQLite QuickLoad (F9)".to_string(),
+        "Restore saved quicksave_f5 slot from SQLite WAL".to_string(),
+        PaletteAction::QuickLoadF9,
+    );
+
+    entries
+}
+
+pub fn search_palette_entries<'a>(
+    entries: &'a [PaletteEntry],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a PaletteEntry> {
+    let trimmed = query.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return entries.iter().take(limit.max(1)).collect();
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let mut scored: Vec<(i32, &PaletteEntry)> = Vec::new();
+    for entry in entries {
+        let mut matched = true;
+        let mut score = 0_i32;
+        let title_lc = entry.title.to_ascii_lowercase();
+        for &tk in &tokens {
+            if let Some(pos) = entry.search_blob.find(tk) {
+                if title_lc.starts_with(tk) {
+                    score += 35;
+                } else if pos < 18 {
+                    score += 18;
+                } else {
+                    score += 6;
+                }
+            } else {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            scored.push((score, entry));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+        .into_iter()
+        .take(limit.max(1))
+        .map(|(_, e)| e)
+        .collect()
 }
 use crate::models::{ModelArch, ModelTier, OutputGoal, RenderMode};
 use crate::persistence::{LabStore, WorksetEnvelope};
@@ -41,6 +258,12 @@ pub struct NeuroSpaceApp {
     pub probe_tool: ProbeTool,
     pub show_bottom_matrix: bool,
     pub show_about_modal: bool,
+    pub cmd_palette_open: bool,
+    pub cmd_query: String,
+    pub cmd_selected_idx: usize,
+    pub cmd_entries: Vec<PaletteEntry>,
+    pub show_bifurcation_modal: bool,
+    pub last_bifurcation_digest: Option<PlasticityBifurcationDigest>,
     pub status_banner: String,
     store: Option<LabStore>,
 }
@@ -87,7 +310,13 @@ impl NeuroSpaceApp {
             probe_tool: ProbeTool::Inspect,
             show_bottom_matrix: true,
             show_about_modal: false,
-            status_banner: "Ready — Drag 3D Neural Space to orbit, scroll to zoom, F5/F9 to save/load."
+            cmd_palette_open: false,
+            cmd_query: String::new(),
+            cmd_selected_idx: 0,
+            cmd_entries: build_palette_entries(),
+            show_bifurcation_modal: false,
+            last_bifurcation_digest: None,
+            status_banner: "Ready — Drag 3D Neural Space to orbit, Ctrl+K for command palette, F5/F9 to save/load."
                 .to_string(),
             store,
         }
@@ -196,12 +425,204 @@ impl NeuroSpaceApp {
             }
         }
     }
+
+    pub fn ensure_bifurcation_digest(&mut self, steps_per_point: usize) -> &PlasticityBifurcationDigest {
+        let needs_compute = self
+            .last_bifurcation_digest
+            .as_ref()
+            .map_or(true, |d| d.model != self.sim.model || d.dataset != self.sim.dataset_id);
+        if needs_compute {
+            self.last_bifurcation_digest = Some(self.sim.run_plasticity_bifurcation_sweep(steps_per_point));
+        }
+        self.last_bifurcation_digest
+            .get_or_insert_with(|| self.sim.run_plasticity_bifurcation_sweep(steps_per_point))
+    }
+
+    fn export_bifurcation_digest_dialog(&mut self, is_csv: bool) {
+        let digest = self.ensure_bifurcation_digest(20).clone();
+        let (default_name, filter_lbl, ext, payload_res) = if is_csv {
+            (
+                "neurospace_plasticity_bifurcation.csv",
+                "CSV Table",
+                "csv",
+                Ok(digest.to_csv()),
+            )
+        } else {
+            (
+                "neurospace_plasticity_bifurcation.json",
+                "JSON Digest",
+                "json",
+                digest
+                    .to_json_pretty()
+                    .map_err(|e| format!("JSON serialize error: {e}")),
+            )
+        };
+        let payload = match payload_res {
+            Ok(txt) => txt,
+            Err(e) => {
+                self.status_banner = e;
+                return;
+            }
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(filter_lbl, &[ext])
+            .set_file_name(default_name)
+            .save_file()
+        {
+            match std::fs::write(&path, payload) {
+                Ok(()) => {
+                    self.status_banner = format!(
+                        "Exported plasticity bifurcation digest ({}) to {}",
+                        ext.to_uppercase(),
+                        path.display()
+                    );
+                }
+                Err(e) => self.status_banner = format!("Digest export failed: {e}"),
+            }
+        }
+    }
+
+    pub fn execute_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::SelectModel(arch) => {
+                self.selected_neuron = None;
+                self.hovered_neuron = None;
+                let was_locked = self.sim.model_locked;
+                self.sim.model_locked = false;
+                self.sim.select_model(arch);
+                self.sim.model_locked = was_locked;
+                self.status_banner = format!("Switched architecture to {} ({})", arch.code(), arch.name());
+            }
+            PaletteAction::FocusCorticalRole(role) => {
+                if let Some(idx) = self.sim.neurons.iter().position(|n| n.role == role && !n.ablated) {
+                    self.selected_neuron = Some(idx);
+                    self.status_banner = format!(
+                        "Focused cortical region/soma #{} [{}]",
+                        self.sim.neurons[idx].id,
+                        role.label_for_model(self.sim.model, self.sim.neurons[idx].layer)
+                    );
+                } else {
+                    self.selected_neuron = self.sim.neurons.first().map(|n| n.id);
+                    self.status_banner = format!(
+                        "Role '{}' not present in {}; focused primary soma.",
+                        role.label(),
+                        self.sim.model.code()
+                    );
+                }
+            }
+            PaletteAction::ApplyPlasticityProtocol(proto) => {
+                match proto {
+                    "neurogenesis" => {
+                        self.sim.params.prune_threshold = 0.025;
+                        self.sim.params.plasticity_growth = 0.85;
+                    }
+                    "pruning" => {
+                        self.sim.params.prune_threshold = 0.14;
+                        self.sim.params.plasticity_growth = 0.12;
+                    }
+                    "frozen" => {
+                        self.sim.params.prune_threshold = 0.0;
+                        self.sim.params.plasticity_growth = 0.0;
+                    }
+                    _ => {
+                        self.sim.params.prune_threshold = 0.045;
+                        self.sim.params.plasticity_growth = 0.35;
+                    }
+                }
+                self.status_banner = format!(
+                    "Applied plasticity protocol '{proto}' (prune={:.3}, growth={:.2}).",
+                    self.sim.params.prune_threshold, self.sim.params.plasticity_growth
+                );
+            }
+            PaletteAction::ApplyStimulationPreset(preset) => match preset {
+                "chr2_drive" => {
+                    self.probe_tool = ProbeTool::ChR2Excite;
+                    self.sim.opto_clamp_drive = 1.55;
+                    if let Some(idx) = self.sim.neurons.iter().position(|n| !n.ablated && n.layer >= 1) {
+                        self.sim.set_neuron_clamp(idx, OptoClamp::ChR2Excite);
+                        self.selected_neuron = Some(idx);
+                    }
+                    self.status_banner = "Applied ChR2 blue-light cortical photostimulation (drive=1.55).".to_string();
+                }
+                "nphr_silence" => {
+                    self.probe_tool = ProbeTool::NpHRSilence;
+                    if let Some(idx) = self.sim.neurons.iter().position(|n| !n.ablated && n.layer >= 1) {
+                        self.sim.set_neuron_clamp(idx, OptoClamp::NpHRSilence);
+                        self.selected_neuron = Some(idx);
+                    }
+                    self.status_banner = "Applied NpHR yellow-light photoinhibition clamp.".to_string();
+                }
+                "focal_stroke" => {
+                    let n = self.sim.induce_focal_stroke();
+                    self.status_banner = format!("Focal cluster stroke ablated {n} somata.");
+                }
+                "sever_feedback" => {
+                    let n = self.sim.sever_feedback_tracts();
+                    self.status_banner = format!("Severed {n} top-down feedback tracts.");
+                }
+                _ => {
+                    self.sim.heal_all_interventions();
+                    self.status_banner = "Healed all lesions, severed tracts & opto-clamps.".to_string();
+                }
+            },
+            PaletteAction::SetCameraPreset(id) => match id {
+                2 => {
+                    self.camera.set_preset(0.0, 0.0, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Sagittal X-Y (2)".to_string();
+                }
+                3 => {
+                    self.camera.set_preset(std::f32::consts::FRAC_PI_2, 0.04, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Coronal Y-Z (3)".to_string();
+                }
+                4 => {
+                    self.camera.set_preset(0.0, 1.35, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Top-Down X-Z (4)".to_string();
+                }
+                _ => {
+                    self.camera.set_preset(-0.52, 0.24, 25.0, glam::Vec3::ZERO, false);
+                    self.status_banner = "Camera preset: Isometric (1)".to_string();
+                }
+            },
+            PaletteAction::ToggleAutoOrbit => {
+                self.camera.auto_orbit = !self.camera.auto_orbit;
+                self.status_banner = format!(
+                    "Camera auto-orbit {} (A)",
+                    if self.camera.auto_orbit { "enabled" } else { "paused" }
+                );
+            }
+            PaletteAction::SetRenderMode(rm) => {
+                self.render_mode = rm;
+                self.status_banner = format!("Render mode: {}", rm.label());
+            }
+            PaletteAction::ToggleBottomMatrix => {
+                self.show_bottom_matrix = !self.show_bottom_matrix;
+            }
+            PaletteAction::RunPlasticitySweep => {
+                let digest = self.sim.run_plasticity_bifurcation_sweep(20);
+                self.status_banner = format!(
+                    "Plasticity sweep complete (critical prune={:.3}, peak eff={:.4}).",
+                    digest.critical_prune_threshold, digest.peak_efficiency_score
+                );
+                self.last_bifurcation_digest = Some(digest);
+                self.show_bifurcation_modal = true;
+            }
+            PaletteAction::ExportBifurcationJson => self.export_bifurcation_digest_dialog(false),
+            PaletteAction::ExportBifurcationCsv => self.export_bifurcation_digest_dialog(true),
+            PaletteAction::ExportWorksetJson => self.export_workset_dialog(),
+            PaletteAction::QuickSaveF5 => self.quick_save(),
+            PaletteAction::QuickLoadF9 => self.quick_load(),
+        }
+    }
 }
 
 impl NeuroSpaceApp {
     pub fn ui_step(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.show_about_modal {
+            if self.cmd_palette_open {
+                self.cmd_palette_open = false;
+            } else if self.show_bifurcation_modal {
+                self.show_bifurcation_modal = false;
+            } else if self.show_about_modal {
                 self.show_about_modal = false;
             } else if self.selected_neuron.is_some() {
                 self.selected_neuron = None;
@@ -209,6 +630,11 @@ impl NeuroSpaceApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_about_modal = !self.show_about_modal;
+        }
+        if ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::K)) {
+            self.cmd_palette_open = !self.cmd_palette_open;
+            self.cmd_query.clear();
+            self.cmd_selected_idx = 0;
         }
         if ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::O)) {
             self.import_workset_dialog();
@@ -381,6 +807,11 @@ impl NeuroSpaceApp {
                 }
 
                 ui.separator();
+                if ui.button("Jump / Search (Ctrl+K)").clicked() {
+                    self.cmd_palette_open = !self.cmd_palette_open;
+                    self.cmd_query.clear();
+                    self.cmd_selected_idx = 0;
+                }
                 if ui.button("Export Workset...").clicked() {
                     self.export_workset_dialog();
                 }
@@ -619,6 +1050,17 @@ impl NeuroSpaceApp {
                         if (self.sim.params.adversarial_eps - prev_eps).abs() > 0.004 {
                             self.sim.evaluate_validation_core();
                         }
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.small_button("🔬 Plasticity Bifurcation Sweep").clicked() {
+                                self.execute_palette_action(PaletteAction::RunPlasticitySweep);
+                            }
+                            if ui.small_button("Export CSV").clicked() {
+                                self.export_bifurcation_digest_dialog(true);
+                            }
+                            if ui.small_button("Export JSON").clicked() {
+                                self.export_bifurcation_digest_dialog(false);
+                            }
+                        });
                     });
 
                     ui.add_space(6.0);
@@ -988,6 +1430,7 @@ impl NeuroSpaceApp {
                                     ("Shift + Click Soma", "Quick toggle focal ablation on hovered soma"),
                                     ("Alt + Click Soma", "Quick toggle ChR2 photostimulation on hovered soma"),
                                     ("F5 / F9", "SQLite WAL QuickSave / QuickLoad ('quicksave_f5')"),
+                                    ("Ctrl/Cmd + K", "Quick-Jump Command Palette (regions, protocols, exports)"),
                                     ("Ctrl/Cmd+S / Ctrl/Cmd+O", "Export / Import SHA-256 .neuroworkset.json"),
                                     ("F1 / Esc", "Toggle this Help / Close Modal or Clear Selection"),
                                 ] {
@@ -1020,6 +1463,127 @@ impl NeuroSpaceApp {
                 });
             if !open {
                 self.show_about_modal = false;
+            }
+        }
+
+        if self.cmd_palette_open {
+            let mut open = self.cmd_palette_open;
+            let mut chosen_action: Option<PaletteAction> = None;
+            egui::Window::new("Quick-Jump Command Palette (Ctrl+K)")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(500.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+                .show(ctx, |ui| {
+                    let resp = ui.text_edit_singleline(&mut self.cmd_query);
+                    if resp.changed() {
+                        self.cmd_selected_idx = 0;
+                    }
+                    resp.request_focus();
+                    let hits = search_palette_entries(&self.cmd_entries, &self.cmd_query, 18);
+                    if !hits.is_empty() {
+                        self.cmd_selected_idx = self.cmd_selected_idx.min(hits.len() - 1);
+                        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                            self.cmd_selected_idx = (self.cmd_selected_idx + 1).min(hits.len() - 1);
+                        }
+                        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                            self.cmd_selected_idx = self.cmd_selected_idx.saturating_sub(1);
+                        }
+                        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            chosen_action = Some(hits[self.cmd_selected_idx].action.clone());
+                        }
+                    } else {
+                        self.cmd_selected_idx = 0;
+                    }
+                    ui.small("Use Up/Down to select, Enter to execute, Esc to close.");
+                    ui.separator();
+                    ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        for (idx, entry) in hits.iter().enumerate() {
+                            let is_sel = idx == self.cmd_selected_idx;
+                            let lbl = format!("[{}] {} — {}", entry.category, entry.title, entry.subtitle);
+                            if ui.selectable_label(is_sel, lbl).clicked() {
+                                chosen_action = Some(entry.action.clone());
+                            }
+                        }
+                    });
+                });
+            self.cmd_palette_open = open;
+            if let Some(act) = chosen_action {
+                self.cmd_palette_open = false;
+                self.execute_palette_action(act);
+            }
+        }
+
+        if self.show_bifurcation_modal {
+            let mut open = self.show_bifurcation_modal;
+            let mut export_req: Option<bool> = None;
+            let mut rerun_req = false;
+            let digest_opt = self.last_bifurcation_digest.clone();
+            egui::Window::new("Structural Plasticity Bifurcation Digest")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(640.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(digest) = &digest_opt {
+                        ui.label(RichText::new(format!(
+                            "{} ({}) on {} | Critical Prune Boundary: {:.3} | Peak Efficiency: {:.4}",
+                            digest.model.code(),
+                            digest.model.name(),
+                            digest.dataset.code(),
+                            digest.critical_prune_threshold,
+                            digest.peak_efficiency_score
+                        )).strong());
+                        ui.separator();
+                        egui::Grid::new("bifurcation_digest_grid").striped(true).show(ui, |ui| {
+                            ui.strong("Prune");
+                            ui.strong("Growth");
+                            ui.strong("Regime");
+                            ui.strong("Neur/Syn");
+                            ui.strong("FireRate");
+                            ui.strong("NetEff");
+                            ui.strong("Score");
+                            ui.end_row();
+                            for p in &digest.points {
+                                ui.label(format!("{:.3}", p.prune_threshold));
+                                ui.label(format!("{:.2}", p.plasticity_growth));
+                                ui.label(&p.regime_label);
+                                ui.label(format!("{}/{}", p.active_neurons, p.active_synapses));
+                                ui.label(format!("{:.3}", p.mean_firing_rate));
+                                ui.label(format!("{:.4}", p.network_efficiency));
+                                ui.label(format!("{:.1}%", p.primary_score));
+                                ui.end_row();
+                            }
+                        });
+                    } else {
+                        ui.label("No plasticity sweep computed yet.");
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Re-Run Sweep").clicked() {
+                            rerun_req = true;
+                        }
+                        if ui.button("Export JSON...").clicked() {
+                            export_req = Some(false);
+                        }
+                        if ui.button("Export CSV...").clicked() {
+                            export_req = Some(true);
+                        }
+                        if ui.button("Close (Esc)").clicked() {
+                            self.show_bifurcation_modal = false;
+                        }
+                    });
+                });
+            if !open {
+                self.show_bifurcation_modal = false;
+            }
+            if rerun_req {
+                self.execute_palette_action(PaletteAction::RunPlasticitySweep);
+            }
+            if let Some(is_csv) = export_req {
+                self.export_bifurcation_digest_dialog(is_csv);
             }
         }
     }
