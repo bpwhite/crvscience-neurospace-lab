@@ -6,6 +6,8 @@ authors = ["Bryan P. White <bryan@crvscience.com>"]
 description = "Interactive 3D Neural Network Topology, Plasticity & Cerebral Cortex Wetware Lab in Safe Rust"
 license = "GPL-3.0-or-later"
 readme = "README.md"
+homepage = "https://crvscience.com/apps"
+repository = "https://github.com/bpwhite/crvscience-neurospace-lab"
 
 [dependencies]
 eframe = { version = "0.31", default-features = true, features = ["wgpu"] }

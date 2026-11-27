@@ -7,6 +7,8 @@ Native safe-Rust (`#![forbid(unsafe_code)]`) 3D Neural Network Topology, Structu
 - **Scientific Methods**: [docs/SCIENTIFIC_METHODS.md](docs/SCIENTIFIC_METHODS.md)
 - **License**: GNU General Public License v3.0 or later (`GPL-3.0-or-later`, see [LICENSE](LICENSE))
 
+![NeuroSpace Lab Workbench](validation/headless_screenshot.png)
+
 ---
 
 ## Build & Run Quickstart
